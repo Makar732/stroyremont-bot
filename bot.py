@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Храним отправленные лиды чтобы не дублировать
 sent_leads = set()
 
 @dp.message(CommandStart())
@@ -26,21 +25,17 @@ async def start_handler(message: Message):
     
     await save_conversation(user_id, username, first_name, "[]", "{}")
     
-    # Убираем из отправленных при новом старте
     if user_id in sent_leads:
         sent_leads.remove(user_id)
     
     await message.answer(
         f"Здравствуйте, {first_name}! 👋\n\n"
         "Я помощник компании **СтройРемонтНН**.\n\n"
-        "Наши услуги:\n"
-        "🔧 Демонтаж\n"
-        "⚡ Электромонтаж\n"
-        "🚿 Сантехника\n"
-        "🧱 Перегородки и потолки\n"
-        "🔲 Плиточные работы\n"
-        "🎨 Декоративная отделка\n\n"
-        "Какие работы вас интересуют?",
+        "Делаем комплексные ремонты в Нижнем Новгороде:\n"
+        "• Демонтаж, электрика, сантехника\n"
+        "• Перегородки, потолки, плитка\n"
+        "• Декоративная отделка\n\n"
+        "Расскажите, что хотите сделать? 🏠",
         parse_mode="Markdown"
     )
 
@@ -59,6 +54,10 @@ async def message_handler(message: Message):
     else:
         messages = []
         collected_data = {}
+    
+    # Добавляем имя в данные если его ещё нет
+    if not collected_data.get("имя") and first_name != "Клиент":
+        collected_data["имя"] = first_name
     
     messages.append({"role": "user", "content": user_text})
     
@@ -81,16 +80,16 @@ async def message_handler(message: Message):
         
         messages.append({"role": "assistant", "content": reply})
         
-        # Сохраняем (последние 10 сообщений)
+        # Сохраняем последние 16 сообщений для памяти
         await save_conversation(
             user_id, username, first_name, 
-            json.dumps(messages[-10:], ensure_ascii=False), 
+            json.dumps(messages[-16:], ensure_ascii=False), 
             json.dumps(collected_data, ensure_ascii=False)
         )
         
         await message.answer(reply)
         
-        # Отправляем лид если готов и ещё не отправляли
+        # Отправляем лид
         has_contact = collected_data.get("телефон") or username
         
         if ready_for_lead and has_contact and user_id not in sent_leads:
@@ -102,7 +101,7 @@ async def message_handler(message: Message):
             
     except Exception as e:
         logger.error(f"Error: {e}")
-        await message.answer("Ошибка. Попробуйте снова.")
+        await message.answer("Что-то пошло не так, попробуйте ещё раз 🙏")
 
 async def send_lead_to_admin(user_id, username, first_name, collected_data, lead_status, status_reason):
     
@@ -112,8 +111,8 @@ async def send_lead_to_admin(user_id, username, first_name, collected_data, lead
         "нецелевой": "❌ НЕЦЕЛЕВОЙ"
     }.get(lead_status, "❓ НЕ ОПРЕДЕЛЁН")
     
-    phone = collected_data.get('телефон', 'не указан')
-    contact_info = f"📞 {phone}" if phone != 'не указан' else f"📱 @{username}" if username else "❌ Нет контакта"
+    phone = collected_data.get('телефон', '')
+    tg_contact = f"@{username}" if username else "нет"
     
     lead_text = f"""
 {'='*30}
@@ -121,11 +120,12 @@ async def send_lead_to_admin(user_id, username, first_name, collected_data, lead
 {'='*30}
 
 {status_emoji}
-💬 {status_reason}
+💬 {status_reason if status_reason else 'Причина не указана'}
 
-👤 {collected_data.get('имя', first_name)}
-{contact_info}
-🆔 {user_id}
+👤 Имя: {collected_data.get('имя', first_name)}
+📞 Телефон: {phone if phone else 'не указан'}
+📱 Telegram: {tg_contact}
+🆔 ID: {user_id}
 
 🏠 Объект: {collected_data.get('тип_объекта', '—')}
 📐 Площадь: {collected_data.get('площадь', '—')}
