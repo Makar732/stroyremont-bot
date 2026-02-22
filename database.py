@@ -35,8 +35,7 @@ async def get_conversation(user_id: int):
             "SELECT messages, collected_data FROM conversations WHERE user_id = ?",
             (user_id,)
         ) as cursor:
-            row = await cursor.fetchone()
-            return row if row else None
+            return await cursor.fetchone()
 
 async def save_conversation(user_id: int, username: str, first_name: str, messages: str, collected_data: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -62,10 +61,7 @@ async def save_lead(user_id: int, data: str, score: str, score_reason: str):
         )
         await db.commit()
 
-# НОВЫЕ ФУНКЦИИ
-
 async def is_lead_sent(user_id: int) -> bool:
-    """Проверяет, отправлен ли уже лид"""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT status FROM conversations WHERE user_id = ?",
@@ -75,18 +71,8 @@ async def is_lead_sent(user_id: int) -> bool:
             return row and row[0] == 'lead_sent'
 
 async def reset_user(user_id: int):
-    """Сбрасывает пользователя для нового диалога"""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE conversations SET status = 'active', messages = '[]', collected_data = '{}' WHERE user_id = ?",
-            (user_id,)
-        )
+        await db.execute("""
+            DELETE FROM conversations WHERE user_id = ?
+        """, (user_id,))
         await db.commit()
-
-async def get_all_leads():
-    """Получить все лиды (для админки)"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT user_id, data, score, sent_at FROM leads ORDER BY sent_at DESC"
-        ) as cursor:
-            return await cursor.fetchall()
