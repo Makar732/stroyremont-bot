@@ -1,6 +1,7 @@
 import aiohttp
 import json
 import logging
+import re
 from config import OPENROUTER_API_KEY, COMPANY_INFO, DATA_TO_COLLECT
 
 logger = logging.getLogger(__name__)
@@ -16,41 +17,40 @@ SYSTEM_PROMPT = f"""Ты — виртуальный помощник компа�
 
 {DATA_TO_COLLECT}
 
-ПРАВИЛА ПОВЕДЕНИЯ:
+ПРАВИЛА:
 - Отвечай кратко, по делу, дружелюбно
 - Не задавай все вопросы сразу — веди естественный диалог
-- Если клиент сам даёт информацию — запоминай и не переспрашивай
 - Когда собрал достаточно данных — предложи что менеджер свяжется
-- Если клиент просит цену — объясни что нужна оценка объекта или подробности
 
-ФОРМАТ ОТВЕТА:
-Отвечай ТОЛЬКО в JSON формате без markdown:
-{{
-    "reply": "твой ответ клиенту",
-    "collected_data": {{
-        "имя": "...",
-        "телефон": "...",
-        "тип_объекта": "...",
-        "площадь": "...",
-        "работы": "...",
-        "чертежи": "...",
-        "бюджет": "...",
-        "сроки_начала": "...",
-        "адрес": "..."
-    }},
-    "ready_for_lead": false,
-    "lead_score": "холодный",
-    "score_reason": "пока мало данных"
-}}
+ВАЖНО! Отвечай ТОЛЬКО JSON без лишнего текста:
+{{"reply": "твой ответ клиенту", "collected_data": {{"имя": "...", "телефон": "...", "тип_объекта": "...", "площадь": "...", "работы": "...", "чертежи": "...", "бюджет": "...", "сроки_начала": "...", "адрес": "..."}}, "ready_for_lead": false, "lead_score": "холодный", "score_reason": "причина"}}
 
-В collected_data заполняй только то что узнал (остальные поля не включай). 
-ready_for_lead = true когда есть минимум: телефон + понимание что нужно сделать.
-
-ОЦЕНКА КЛИЕНТА:
-🔥 ГОРЯЧИЙ: есть телефон, знает что хочет, готов начать скоро (до месяца), не торгуется, адекватен
-🟡 ТЁПЛЫЙ: есть контакт, но сроки неопределённые или 1-3 месяца, ещё думает
-🟢 ХОЛОДНЫЙ: "просто узнать", нет конкретики, торгуется сразу, далёкие сроки
+ready_for_lead = true когда есть: телефон + что нужно сделать.
+Оценка: горячий (готов начать скоро) / тёплый (думает 1-3 мес) / холодный (просто узнать)
 """
+
+def extract_json_from_response(text: str) -> dict:
+    """Извлекает JSON из ответа AI, даже если там есть лишний текст"""
+    text = text.strip()
+    
+    # Пробуем найти JSON в тексте
+    json_match = re.search(r'\{[\s\S]*\}', text)
+    if json_match:
+        try:
+            return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+    
+    # Убираем markdown обёртки
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0]
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0]
+    
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        return None
 
 async def get_ai_response(messages: list, collected_data: dict) -> dict:
     context_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -58,7 +58,7 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
     if collected_data:
         context_messages.append({
             "role": "system", 
-            "content": f"Уже собранные данные о клиенте: {json.dumps(collected_data, ensure_ascii=False)}"
+            "content": f"Уже собранные данные: {json.dumps(collected_data, ensure_ascii=False)}"
         })
     
     context_messages.extend(messages)
@@ -82,15 +82,10 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
             ) as response:
                 result = await response.json()
                 
-                # Логируем ответ для отладки
-                logger.info(f"OpenRouter response status: {response.status}")
-                logger.info(f"OpenRouter response: {result}")
-                
-                # Проверяем на ошибки API
                 if "error" in result:
                     logger.error(f"OpenRouter API error: {result['error']}")
                     return {
-                        "reply": "Извините, сейчас возникли технические сложности. Напишите ваш вопрос ещё раз или оставьте телефон — мы перезвоним!",
+                        "reply": "Извините, технические сложности. Оставьте телефон — мы перезвоним!",
                         "collected_data": {},
                         "ready_for_lead": False,
                         "lead_score": None,
@@ -98,44 +93,29 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                     }
                 
                 content = result["choices"][0]["message"]["content"]
-                logger.info(f"AI raw content: {content}")
+                logger.info(f"AI raw: {content[:200]}...")
                 
-                # Убираем markdown обёртки
-                content = content.strip()
-                if content.startswith("```json"):
-                    content = content[7:]
-                if content.startswith("```"):
-                    content = content[3:]
-                if content.endswith("```"):
-                    content = content[:-3]
-                content = content.strip()
+                # Извлекаем JSON
+                parsed = extract_json_from_response(content)
                 
-                parsed = json.loads(content)
-                return parsed
+                if parsed and "reply" in parsed:
+                    logger.info(f"Parsed OK. ready_for_lead={parsed.get('ready_for_lead')}, collected={parsed.get('collected_data')}")
+                    return parsed
+                else:
+                    # Если не удалось распарсить — возвращаем текст как есть
+                    logger.warning(f"Could not parse JSON, returning raw text")
+                    return {
+                        "reply": content.split("{")[0].strip() if "{" in content else content,
+                        "collected_data": {},
+                        "ready_for_lead": False,
+                        "lead_score": None,
+                        "score_reason": None
+                    }
                 
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error: {e}, content was: {content}")
-        # Если не JSON — возвращаем как обычный текст
-        return {
-            "reply": content if 'content' in dir() else "Произошла ошибка обработки. Попробуйте ещё раз.",
-            "collected_data": {},
-            "ready_for_lead": False,
-            "lead_score": None,
-            "score_reason": None
-        }
-    except KeyError as e:
-        logger.error(f"KeyError: {e}, result was: {result}")
-        return {
-            "reply": "Произошла ошибка. Попробуйте написать ещё раз.",
-            "collected_data": {},
-            "ready_for_lead": False,
-            "lead_score": None,
-            "score_reason": None
-        }
     except Exception as e:
-        logger.error(f"Unexpected error in get_ai_response: {type(e).__name__}: {e}")
+        logger.error(f"Error in get_ai_response: {type(e).__name__}: {e}")
         return {
-            "reply": "Произошла техническая ошибка. Попробуйте позже или оставьте телефон — мы свяжемся!",
+            "reply": "Произошла ошибка. Попробуйте ещё раз!",
             "collected_data": {},
             "ready_for_lead": False,
             "lead_score": None,
