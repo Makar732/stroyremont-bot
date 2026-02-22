@@ -119,6 +119,9 @@ async def message_handler(message: Message):
 
 async def send_lead_to_admin(user_id, username, first_name, collected_data, lead_status, status_reason):
     
+    logger.info(f"🔵 send_lead_to_admin CALLED for {user_id}")
+    logger.info(f"🔵 ADMIN_ID = {ADMIN_ID} (type: {type(ADMIN_ID)})")
+    
     status_emoji = {
         "целевой": "✅ ЦЕЛЕВОЙ",
         "под_вопросом": "⚠️ ПОД ВОПРОСОМ",
@@ -149,19 +152,30 @@ async def send_lead_to_admin(user_id, username, first_name, collected_data, lead
 {'='*30}
 """
     
+    logger.info(f"🔵 Sending message to {ADMIN_ID}...")
+    
     try:
-        await bot.send_message(ADMIN_ID, lead_text)
+        result = await bot.send_message(int(ADMIN_ID), lead_text)
+        logger.info(f"✅ Message sent! message_id={result.message_id}")
+        
         await save_lead(user_id, json.dumps(collected_data, ensure_ascii=False), lead_status, status_reason)
-        logger.info(f"✅ LEAD SENT to admin")
+        logger.info(f"✅ Lead saved to DB")
+        
     except Exception as e:
-        logger.error(f"❌ Failed to send lead: {e}")
+        logger.error(f"❌ FAILED: {type(e).__name__}: {e}")
+        # Покажем ошибку в консоль полностью
+        import traceback
+        traceback.print_exc()
 
+from aiogram.filters import Command
 
-async def main():
-    await init_db()
-    logger.info("Bot started!")
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp.message(Command("test_admin"))
+async def test_admin(message: Message):
+    """Тест отправки админу"""
+    try:
+        logger.info(f"Testing send to ADMIN_ID={ADMIN_ID}")
+        await bot.send_message(int(ADMIN_ID), f"🧪 Тест от {message.from_user.id}")
+        await message.answer("✅ Отправлено админу!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        logger.error(f"Test failed: {e}")
