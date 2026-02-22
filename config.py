@@ -3,9 +3,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 7451333839))
+BOT_TOKEN = 8573569401:AAHGZTU5IF2DEkVqmHhBvf0g-KLAeQCkKro
+ADMIN_ID = 7451333839 # твой ID числом, узнай через @userinfobot
+OPENROUTER_API_KEY = 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
 
 COMPANY_INFO = """
 Компания: СтройРемонтНН
