@@ -2,106 +2,66 @@ import aiohttp
 import json
 import logging
 import re
-from config import OPENROUTER_API_KEY, COMPANY_INFO, DATA_TO_COLLECT
+from config import OPENROUTER_API_KEY, COMPANY_INFO
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""Ты — виртуальный помощник строительной компании «СтройРемонтНН».
+SYSTEM_PROMPT = f"""Ты — бот компании СтройРемонтНН. Веди диалог коротко.
 
-Компания работает в Нижнем Новгороде и по Нижегородской области.
-Основной профиль — комплексные ремонтные и строительные работы.
-Компания не занимается мелкими разовыми задачами (замена крана, мелкий ремонт и т.п.).
+{COMPANY_INFO}
 
-Стиль общения:
+ЦЕЛЬ: получить телефон, понять объём работ, отсеять мелочь.
 
-Уверенный эксперт
+ПРАВИЛА:
+- 1-2 предложения максимум
+- Один вопрос за раз
+- Без воды и вступлений
+- На вопрос о цене — называй цифры как ориентир
+- Мелкие работы или бюджет <100к — вежливо отказывай
 
-Спокойный, профессиональный
+ПОРЯДОК:
+1. Что нужно сделать?
+2. Какой объём/площадь?
+3. Когда планируете начать?
+4. Какой бюджет?
+5. Телефон для связи?
 
-Эмодзи использовать редко и уместно
+Если нет телефона — попроси ещё раз вежливо.
 
-Без излишней болтовни
+ОТВЕТ СТРОГО JSON:
+{{"reply":"ответ","collected_data":{{"имя":"","телефон":"","тип_объекта":"","площадь":"","работы":"","бюджет":"","сроки":""}},"ready_for_lead":false,"lead_status":"none","status_reason":""}}
 
-Без ощущения анкеты
+lead_status:
+- "целевой" — бюджет ок, работа крупная, готов начать
+- "под_вопросом" — что-то не ясно, но потенциал есть
+- "нецелевой" — мелочь, бюджет <100к, торгуется
 
-Твоя задача:
-
-Помочь клиенту
-
-Квалифицировать его
-
-Отсеять нецелевых
-
-Получить имя, телефон, тип объекта, примерный объем, сроки, бюджет и район
-
-Правила поведения:
-
-Если клиент задаёт вопрос — сначала ответь по существу, потом мягко верни к сбору информации.
-
-Не задавай подряд сухие вопросы. Между вопросами добавляй короткие экспертные комментарии.
-
-Объясняй, зачем нужен номер телефона (для согласования замера).
-
-Телефон обязателен.
-
-Не отправляй примерные цены до получения информации.
-
-Если бюджет ниже 100 000 ₽ или работа мелкая — вежливо сообщи, что компания специализируется на более крупных проектах.
-
-Если клиент торгуется или хочет “самое дешёвое”, подчеркни, что компания делает качественные работы и не работает в эконом-сегменте.
-
-Если клиент не указывает сроки или бюджет — уточни.
-
-Если клиент отвечает странно или неполно — аккуратно уточни.
-
-Финал: сообщи, что передаёшь информацию мастеру и с ним свяжутся.
-
-Никогда:
-
-Не выдумывай гарантию
-
-Не придумывай сроки
-
-Не соглашайся на мелкие заказы
-
-Не будь навязчивым
-
-Цель — живой диалог с экспертной позицией и фильтрацией клиентов.
+ready_for_lead=true когда есть телефон ИЛИ отказ/нецелевой.
 """
 
-def extract_json_from_response(text: str) -> dict:
-    """Извлекает JSON из ответа AI, даже если там есть лишний текст"""
+def extract_json(text: str) -> dict:
     text = text.strip()
-    
-    # Пробуем найти JSON в тексте
-    json_match = re.search(r'\{[\s\S]*\}', text)
-    if json_match:
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
         try:
-            return json.loads(json_match.group())
-        except json.JSONDecodeError:
+            return json.loads(match.group())
+        except:
             pass
-    
-    # Убираем markdown обёртки
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0]
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0]
-    
-    try:
-        return json.loads(text.strip())
-    except json.JSONDecodeError:
-        return None
+    return None
 
 async def get_ai_response(messages: list, collected_data: dict) -> dict:
-    context_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # Берём только последние 4 сообщения для экономии токенов
+    recent_messages = messages[-4:] if len(messages) > 4 else messages
+    
+    context = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     if collected_data:
-        context_messages.append({
+        context.append({
             "role": "system", 
-            "content": f"Уже собранные данные: {json.dumps(collected_data, ensure_ascii=False)}"
+            "content": f"Известно: {json.dumps(collected_data, ensure_ascii=False)}"
         })
     
-    context_messages.extend(messages)
+    context.extend(recent_messages)
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -115,49 +75,33 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 },
                 json={
                     "model": "openai/gpt-4o-mini",
-                    "messages": context_messages,
+                    "messages": context,
                     "temperature": 0.7,
-                    "max_tokens": 1000
+                    "max_tokens": 200  # Экономия токенов
                 }
             ) as response:
                 result = await response.json()
                 
                 if "error" in result:
-                    logger.error(f"OpenRouter API error: {result['error']}")
-                    return {
-                        "reply": "Извините, технические сложности. Оставьте телефон — мы перезвоним!",
-                        "collected_data": {},
-                        "ready_for_lead": False,
-                        "lead_score": None,
-                        "score_reason": None
-                    }
+                    logger.error(f"API error: {result['error']}")
+                    return {"reply": "Ошибка. Напишите ещё раз.", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
                 
                 content = result["choices"][0]["message"]["content"]
-                logger.info(f"AI raw: {content[:200]}...")
+                logger.info(f"AI: {content[:100]}...")
                 
-                # Извлекаем JSON
-                parsed = extract_json_from_response(content)
+                parsed = extract_json(content)
                 
                 if parsed and "reply" in parsed:
-                    logger.info(f"Parsed OK. ready_for_lead={parsed.get('ready_for_lead')}, collected={parsed.get('collected_data')}")
                     return parsed
                 else:
-                    # Если не удалось распарсить — возвращаем текст как есть
-                    logger.warning(f"Could not parse JSON, returning raw text")
                     return {
                         "reply": content.split("{")[0].strip() if "{" in content else content,
                         "collected_data": {},
                         "ready_for_lead": False,
-                        "lead_score": None,
-                        "score_reason": None
+                        "lead_status": "none",
+                        "status_reason": ""
                     }
                 
     except Exception as e:
-        logger.error(f"Error in get_ai_response: {type(e).__name__}: {e}")
-        return {
-            "reply": "Произошла ошибка. Попробуйте ещё раз!",
-            "collected_data": {},
-            "ready_for_lead": False,
-            "lead_score": None,
-            "score_reason": None
-        }
+        logger.error(f"Error: {e}")
+        return {"reply": "Ошибка. Попробуйте снова.", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
