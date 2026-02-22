@@ -50,7 +50,6 @@ def extract_json(text: str) -> dict:
     return None
 
 async def get_ai_response(messages: list, collected_data: dict) -> dict:
-    # Берём только последние 4 сообщения для экономии токенов
     recent_messages = messages[-4:] if len(messages) > 4 else messages
     
     context = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -77,7 +76,7 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                     "model": "openai/gpt-4o-mini",
                     "messages": context,
                     "temperature": 0.7,
-                    "max_tokens": 200  # Экономия токенов
+                    "max_tokens": 200
                 }
             ) as response:
                 result = await response.json()
