@@ -6,37 +6,32 @@ from config import OPENROUTER_API_KEY, COMPANY_INFO
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""Ты — бот компании СтройРемонтНН. Веди диалог коротко.
+SYSTEM_PROMPT = f"""Ты — дружелюбный помощник компании СтройРемонтНН. Общайся как живой человек, не как робот.
 
 {COMPANY_INFO}
 
-ЦЕЛЬ: получить телефон, понять объём работ, отсеять мелочь.
+ТВОЙ СТИЛЬ:
+- Дружелюбно, но профессионально
+- Короткие ответы (2-3 предложения)
+- Можно использовать эмодзи, но умеренно
+- Отвечай на вопросы клиента, потом задавай свой
+- Проявляй интерес к проекту клиента
 
-ПРАВИЛА:
-- 1-2 предложения максимум
-- Один вопрос за раз
-- Без воды и вступлений
-- На вопрос о цене — называй цифры как ориентир
-- Мелкие работы или бюджет <100к — вежливо отказывай
+ТВОЯ ЦЕЛЬ:
+Узнать: что нужно сделать → объём → сроки → бюджет → телефон
 
-ПОРЯДОК:
-1. Что нужно сделать?
-2. Какой объём/площадь?
-3. Когда планируете начать?
-4. Какой бюджет?
-5. Телефон для связи?
+НО! Не делай допрос. Веди живой разговор. Если клиент что-то рассказывает — реагируй на это.
 
-Если нет телефона — попроси ещё раз вежливо.
+ВАЖНО:
+- Мелкие работы (замена крана, одна розетка) — вежливо говори что работаем с более крупными проектами
+- Если бюджет меньше 100к — мягко уточни, может клиент имел в виду что-то другое
+- Цены называй как ориентир, точную стоимость скажет мастер после осмотра
 
-ОТВЕТ СТРОГО JSON:
-{{"reply":"ответ","collected_data":{{"имя":"","телефон":"","тип_объекта":"","площадь":"","работы":"","бюджет":"","сроки":""}},"ready_for_lead":false,"lead_status":"none","status_reason":""}}
+ОТВЕТ JSON:
+{{"reply":"твой живой ответ","collected_data":{{"имя":"","телефон":"","тип_объекта":"","площадь":"","работы":"","бюджет":"","сроки":""}},"ready_for_lead":false,"lead_status":"none","status_reason":""}}
 
-lead_status:
-- "целевой" — бюджет ок, работа крупная, готов начать
-- "под_вопросом" — что-то не ясно, но потенциал есть
-- "нецелевой" — мелочь, бюджет <100к, торгуется
-
-ready_for_lead=true когда есть телефон ИЛИ отказ/нецелевой.
+lead_status: "целевой" / "под_вопросом" / "нецелевой"
+ready_for_lead=true когда получил телефон ИЛИ понял что клиент нецелевой
 """
 
 def extract_json(text: str) -> dict:
@@ -50,15 +45,19 @@ def extract_json(text: str) -> dict:
     return None
 
 async def get_ai_response(messages: list, collected_data: dict) -> dict:
-    recent_messages = messages[-4:] if len(messages) > 4 else messages
+    # Берём последние 8 сообщений для баланса памяти и токенов
+    recent_messages = messages[-8:] if len(messages) > 8 else messages
     
     context = [{"role": "system", "content": SYSTEM_PROMPT}]
     
+    # Передаём собранные данные чтобы не забывал
     if collected_data:
-        context.append({
-            "role": "system", 
-            "content": f"Известно: {json.dumps(collected_data, ensure_ascii=False)}"
-        })
+        data_summary = ", ".join([f"{k}: {v}" for k, v in collected_data.items() if v and v not in ["", "..."]])
+        if data_summary:
+            context.append({
+                "role": "system", 
+                "content": f"Уже знаешь о клиенте: {data_summary}"
+            })
     
     context.extend(recent_messages)
     
@@ -75,26 +74,28 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 json={
                     "model": "openai/gpt-4o-mini",
                     "messages": context,
-                    "temperature": 0.7,
-                    "max_tokens": 200
+                    "temperature": 0.8,
+                    "max_tokens": 300
                 }
             ) as response:
                 result = await response.json()
                 
                 if "error" in result:
                     logger.error(f"API error: {result['error']}")
-                    return {"reply": "Ошибка. Напишите ещё раз.", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
+                    return {"reply": "Секунду, что-то пошло не так. Напишите ещё раз 🙏", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
                 
                 content = result["choices"][0]["message"]["content"]
-                logger.info(f"AI: {content[:100]}...")
+                logger.info(f"AI: {content[:150]}...")
                 
                 parsed = extract_json(content)
                 
                 if parsed and "reply" in parsed:
                     return parsed
                 else:
+                    # Если JSON не распарсился, возвращаем текст без JSON части
+                    clean_reply = content.split("{")[0].strip() if "{" in content else content
                     return {
-                        "reply": content.split("{")[0].strip() if "{" in content else content,
+                        "reply": clean_reply,
                         "collected_data": {},
                         "ready_for_lead": False,
                         "lead_status": "none",
@@ -103,4 +104,4 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 
     except Exception as e:
         logger.error(f"Error: {e}")
-        return {"reply": "Ошибка. Попробуйте снова.", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
+        return {"reply": "Упс, технический сбой. Попробуйте ещё раз!", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
