@@ -6,79 +6,95 @@ from config import OPENROUTER_API_KEY, COMPANY_INFO
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""Ты — дружелюбный помощник компании СтройРемонтНН. Общайся как живой человек.
+SYSTEM_PROMPT = f"""Ты — дружелюбный помощник компании СтройРемонтНН.
 
 {COMPANY_INFO}
 
-СТИЛЬ:
-- Дружелюбно и профессионально
-- 2-3 предложения максимум
-- Реагируй на слова клиента, не игнорируй
-- Эмодзи умеренно
+СТИЛЬ: Дружелюбно, 2-3 предложения, эмодзи умеренно.
 
-ЦЕЛЬ — собрать ВСЕ данные:
-1. Что нужно сделать (работы)
-2. Тип объекта (квартира/дом/коммерция)
-3. Площадь (кв.м)
-4. Адрес или район
-5. Сроки начала
-6. Бюджет
-7. Телефон
+СОБЕРИ ДАННЫЕ (спрашивай постепенно):
+- работы (что делать)
+- тип_объекта (квартира/дом/коммерция)  
+- площадь (кв.м)
+- адрес
+- сроки
+- бюджет
+- телефон
 
-Спрашивай естественно, по ходу разговора. Не все сразу.
+ОТВЕЧАЙ ТОЛЬКО ЧИСТЫМ JSON (без ```):
+{{"reply":"ответ клиенту","collected_data":{{"телефон":"","работы":"","тип_объекта":"","площадь":"","адрес":"","сроки":"","бюджет":""}},"lead_status":"none","status_reason":""}}
 
-ВАЖНО:
-- Мелкие работы — вежливо говори что работаем с крупными проектами
-- Цены называй как ориентир
+lead_status: "целевой"/"под_вопросом"/"нецелевой"/"none"
+В collected_data пиши ТОЛЬКО новые данные из ЭТОГО сообщения клиента."""
 
-ОТВЕТ СТРОГО JSON:
-{{"reply":"ответ","collected_data":{{"телефон":"","работы":"","тип_объекта":"","площадь":"","адрес":"","сроки":"","бюджет":""}},"lead_status":"none","status_reason":""}}
 
-lead_status:
-- "целевой" — бюджет от 100к, крупная работа, адекватные сроки
-- "под_вопросом" — потенциал есть, но что-то смущает
-- "нецелевой" — мелочь, бюджет <100к, торгуется, "просто узнать"
-"""
+def normalize_keys(data: dict) -> dict:
+    mapping = {
+        "phone": "телефон", "тел": "телефон",
+        "работа": "работы", "work": "работы",
+        "area": "площадь", "метраж": "площадь",
+        "budget": "бюджет",
+        "timing": "сроки", "когда": "сроки", "сроки_начала": "сроки",
+        "type": "тип_объекта", "тип": "тип_объекта", "объект": "тип_объекта",
+        "address": "адрес", "район": "адрес",
+    }
+    
+    normalized = {}
+    for key, value in data.items():
+        if not value or value in ["...", "", "неизвестно", "не указано"]:
+            continue
+        new_key = mapping.get(key.lower(), key.lower())
+        normalized[new_key] = value
+    
+    return normalized
+
 
 def extract_json(text: str) -> dict:
     text = text.strip()
+    text = re.sub(r'```json\s*', '', text)
+    text = re.sub(r'```\s*', '', text)
+    
     match = re.search(r'\{[\s\S]*\}', text)
     if match:
         try:
-            return json.loads(match.group())
-        except:
-            pass
+            data = json.loads(match.group())
+            # Нормализуем ключи сразу
+            if "collected_data" in data:
+                data["collected_data"] = normalize_keys(data["collected_data"])
+            return data
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON parse error: {e}")
     return None
 
+
 async def get_ai_response(messages: list, collected_data: dict) -> dict:
-    recent_messages = messages[-8:] if len(messages) > 8 else messages
+    recent = messages[-8:]
     
     context = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     if collected_data:
-        data_summary = ", ".join([f"{k}: {v}" for k, v in collected_data.items() if v and v not in ["", "...", None]])
-        if data_summary:
+        known = ", ".join(f"{k}: {v}" for k, v in collected_data.items() if v)
+        if known:
             context.append({
-                "role": "system", 
-                "content": f"Уже знаешь: {data_summary}. Не спрашивай это повторно!"
+                "role": "system",
+                "content": f"УЖЕ ЗНАЕМ: {known}. Не спрашивай повторно!"
             })
     
-    context.extend(recent_messages)
+    context.extend(recent)
     
     try:
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
-                    "HTTP-Referer": "https://github.com/stroyremont-bot",
-                    "X-Title": "StroyRemontNN Bot"
                 },
                 json={
                     "model": "openai/gpt-4o-mini",
                     "messages": context,
-                    "temperature": 0.8,
+                    "temperature": 0.7,
                     "max_tokens": 300
                 }
             ) as response:
@@ -86,24 +102,32 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 
                 if "error" in result:
                     logger.error(f"API error: {result['error']}")
-                    return {"reply": "Секунду, что-то пошло не так. Напишите ещё раз 🙏", "collected_data": {}, "lead_status": "none", "status_reason": ""}
+                    return default_response("Секунду, попробуйте ещё раз 🙏")
                 
                 content = result["choices"][0]["message"]["content"]
-                logger.info(f"AI: {content[:150]}...")
+                logger.info(f"AI raw: {content[:200]}")
                 
                 parsed = extract_json(content)
                 
                 if parsed and "reply" in parsed:
                     return parsed
-                else:
-                    clean_reply = content.split("{")[0].strip() if "{" in content else content
-                    return {
-                        "reply": clean_reply,
-                        "collected_data": {},
-                        "lead_status": "none",
-                        "status_reason": ""
-                    }
                 
+                # Fallback
+                clean = content.split("{")[0].strip() if "{" in content else content
+                return default_response(clean or "Расскажите подробнее 🙂")
+                
+    except asyncio.TimeoutError:
+        logger.error("API timeout")
+        return default_response("Сервер думает долго, попробуйте ещё раз")
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return {"reply": "Упс, технический сбой. Попробуйте ещё раз!", "collected_data": {}, "lead_status": "none", "status_reason": ""}
+        logger.error(f"Error: {e}", exc_info=True)
+        return default_response("Технический сбой, попробуйте ещё раз!")
+
+
+def default_response(text: str) -> dict:
+    return {
+        "reply": text,
+        "collected_data": {},
+        "lead_status": "none",
+        "status_reason": ""
+    }
