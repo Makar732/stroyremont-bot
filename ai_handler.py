@@ -10,44 +10,23 @@ SYSTEM_PROMPT = f"""Ты — дружелюбный помощник компа�
 
 {COMPANY_INFO}
 
-СТИЛЬ: Дружелюбно, 2-3 предложения, эмодзи умеренно.
-
-СОБЕРИ ДАННЫЕ (спрашивай постепенно):
+ТВОЯ ЗАДАЧА — собрать данные через приятный диалог:
+- телефон
 - работы (что делать)
-- тип_объекта (квартира/дом/коммерция)  
-- площадь (кв.м)
+- тип_объекта (квартира/дом/офис)
+- площадь
 - адрес
 - сроки
 - бюджет
-- телефон
 
-ОТВЕЧАЙ ТОЛЬКО ЧИСТЫМ JSON (без ```):
-{{"reply":"ответ клиенту","collected_data":{{"телефон":"","работы":"","тип_объекта":"","площадь":"","адрес":"","сроки":"","бюджет":""}},"lead_status":"none","status_reason":""}}
+Спрашивай по 1-2 вопроса за раз. Будь живым, используй эмодзи.
 
-lead_status: "целевой"/"под_вопросом"/"нецелевой"/"none"
-В collected_data пиши ТОЛЬКО новые данные из ЭТОГО сообщения клиента."""
+ОТВЕЧАЙ СТРОГО JSON БЕЗ MARKDOWN:
+{{"reply":"твой ответ","collected_data":{{"телефон":"","работы":"","тип_объекта":"","площадь":"","адрес":"","сроки":"","бюджет":""}},"lead_status":"none","status_reason":""}}
 
-
-def normalize_keys(data: dict) -> dict:
-    mapping = {
-        "phone": "телефон", "тел": "телефон",
-        "работа": "работы", "work": "работы",
-        "area": "площадь", "метраж": "площадь",
-        "budget": "бюджет",
-        "timing": "сроки", "когда": "сроки", "сроки_начала": "сроки",
-        "type": "тип_объекта", "тип": "тип_объекта", "объект": "тип_объекта",
-        "address": "адрес", "район": "адрес",
-    }
-    
-    normalized = {}
-    for key, value in data.items():
-        if not value or value in ["...", "", "неизвестно", "не указано"]:
-            continue
-        new_key = mapping.get(key.lower(), key.lower())
-        normalized[new_key] = value
-    
-    return normalized
-
+В collected_data пиши ТОЛЬКО то, что клиент СЕЙЧАС сказал. Пустые поля не заполняй.
+lead_status: "целевой" / "под_вопросом" / "нецелевой" / "none"
+"""
 
 def extract_json(text: str) -> dict:
     text = text.strip()
@@ -57,19 +36,36 @@ def extract_json(text: str) -> dict:
     match = re.search(r'\{[\s\S]*\}', text)
     if match:
         try:
-            data = json.loads(match.group())
-            # Нормализуем ключи сразу
-            if "collected_data" in data:
-                data["collected_data"] = normalize_keys(data["collected_data"])
-            return data
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error: {e}")
+            return json.loads(match.group())
+        except:
+            pass
     return None
 
+def normalize_data(data: dict) -> dict:
+    if not data:
+        return {}
+    
+    mapping = {
+        "phone": "телефон", "тел": "телефон", "номер": "телефон",
+        "работа": "работы", "work": "работы", "услуги": "работы",
+        "тип": "тип_объекта", "объект": "тип_объекта", "type": "тип_объекта",
+        "area": "площадь", "метраж": "площадь", "квадраты": "площадь",
+        "address": "адрес", "район": "адрес", "где": "адрес",
+        "timing": "сроки", "когда": "сроки", "сроки_начала": "сроки", "начало": "сроки",
+        "budget": "бюджет", "деньги": "бюджет", "цена": "бюджет",
+    }
+    
+    result = {}
+    for key, value in data.items():
+        if not value or value in ["", "...", "неизвестно", "не указано", None]:
+            continue
+        
+        clean_key = mapping.get(key.lower(), key.lower())
+        result[clean_key] = str(value).strip()
+    
+    return result
 
 async def get_ai_response(messages: list, collected_data: dict) -> dict:
-    recent = messages[-8:]
-    
     context = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     if collected_data:
@@ -77,10 +73,10 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
         if known:
             context.append({
                 "role": "system",
-                "content": f"УЖЕ ЗНАЕМ: {known}. Не спрашивай повторно!"
+                "content": f"Уже собрано: {known}. НЕ спрашивай это снова!"
             })
     
-    context.extend(recent)
+    context.extend(messages[-8:])
     
     try:
         timeout = aiohttp.ClientTimeout(total=30)
@@ -101,8 +97,8 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 result = await response.json()
                 
                 if "error" in result:
-                    logger.error(f"API error: {result['error']}")
-                    return default_response("Секунду, попробуйте ещё раз 🙏")
+                    logger.error(f"API error: {result}")
+                    return {"reply": "Секунду... Повторите пожалуйста 🙏", "collected_data": {}, "lead_status": "none", "status_reason": ""}
                 
                 content = result["choices"][0]["message"]["content"]
                 logger.info(f"AI raw: {content[:200]}")
@@ -110,24 +106,12 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 parsed = extract_json(content)
                 
                 if parsed and "reply" in parsed:
+                    parsed["collected_data"] = normalize_data(parsed.get("collected_data", {}))
                     return parsed
                 
-                # Fallback
                 clean = content.split("{")[0].strip() if "{" in content else content
-                return default_response(clean or "Расскажите подробнее 🙂")
+                return {"reply": clean or "Расскажите подробнее 🙂", "collected_data": {}, "lead_status": "none", "status_reason": ""}
                 
-    except asyncio.TimeoutError:
-        logger.error("API timeout")
-        return default_response("Сервер думает долго, попробуйте ещё раз")
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-        return default_response("Технический сбой, попробуйте ещё раз!")
-
-
-def default_response(text: str) -> dict:
-    return {
-        "reply": text,
-        "collected_data": {},
-        "lead_status": "none",
-        "status_reason": ""
-    }
+        logger.error(f"AI Error: {e}")
+        return {"reply": "Ошибка связи, попробуйте ещё раз!", "collected_data": {}, "lead_status": "none", "status_reason": ""}
