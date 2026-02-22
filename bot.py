@@ -1,177 +1,186 @@
-import os
 import asyncio
+import json
+import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
-from openai import OpenAI
-from aiohttp import web
+from aiogram.types import Message
 
-# ===== НАСТРОЙКИ =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+from config import BOT_TOKEN, ADMIN_ID
+from database import init_db, get_conversation, save_conversation, save_lead
+from ai_handler import get_ai_response
 
+# Логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-client = OpenAI(api_key=OPENAI_KEY)
-
-# Хранилище диалогов
-conversations = {}
-
-# ===== ПРОМПТ КОМПАНИИ =====
-SYSTEM_PROMPT = """
-Ты — вежливый сотрудник компании СтройРемонтНН.
-Компания занимается ремонтом квартир, домов и коттеджей 
-в Нижнем Новгороде и области.
-
-Твоя задача:
-1. Отвечать на вопросы клиентов о ремонте
-2. В процессе разговора ЕСТЕСТВЕННО узнать:
-   - Имя клиента
-   - Что нужно сделать (какой ремонт)
-   - Тип объекта (квартира/дом/коттедж)
-   - Площадь в м²
-   - Бюджет (сколько готов потратить)
-   - Сроки (когда хочет начать)
-   - Есть ли проект/чертежи
-   - Номер телефона для связи
-
-3. НЕ спрашивай всё сразу — веди диалог плавно
-4. Когда собрал информацию — поблагодари 
-   и скажи что менеджер свяжется
-
-5. Если не знаешь точную цену — говори 
-   "точную стоимость рассчитает мастер после осмотра"
-6. НЕ придумывай цены
-
-7. Когда собрал данные клиента, в КОНЦЕ сообщения
-   добавь блок:
-   
-   [ЗАЯВКА]
-   Имя: ...
-   Телефон: ...
-   Объект: ...
-   Площадь: ...
-   Бюджет: ...
-   Сроки: ...
-   Чертежи: ...
-   Работы: ...
-   Горячесть: горячий/тёплый/холодный
-   [/ЗАЯВКА]
-"""
-
-
-# ===== ОБРАБОТЧИКИ =====
 
 @dp.message(CommandStart())
-async def start(message: types.Message):
-    conversations[message.from_user.id] = []
+async def start_handler(message: Message):
+    """Обработка команды /start"""
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or "Клиент"
+    
+    # Инициализируем новый диалог
+    welcome_messages = [{"role": "assistant", "content": f"Здравствуйте! 👋 Я виртуальный помощник компании СтройРемонтНН. Подскажу по нашим услугам и помогу оставить заявку. Чем могу помочь?"}]
+    
+    await save_conversation(user_id, username, first_name, json.dumps(welcome_messages), "{}")
+    
     await message.answer(
-        "Здравствуйте! 👋\n\n"
-        "Я — виртуальный помощник компании "
-        "СтройРемонтНН.\n"
-        "Помогу с вопросами по ремонту квартир, "
-        "домов и коттеджей в Нижнем Новгороде.\n\n"
-        "Расскажите, что вас интересует? 🏠"
+        f"Здравствуйте, {first_name}! 👋\n\n"
+        "Я виртуальный помощник компании **СтройРемонтНН**.\n\n"
+        "Подскажу по нашим услугам:\n"
+        "🔧 Демонтаж\n"
+        "⚡ Электромонтаж\n"
+        "🚿 Сантехника\n"
+        "🧱 Перегородки и потолки\n"
+        "🔲 Плиточные работы\n"
+        "🎨 Декоративная отделка\n\n"
+        "Расскажите, что вас интересует?",
+        parse_mode="Markdown"
     )
-
 
 @dp.message(F.text)
-async def chat(message: types.Message):
+async def message_handler(message: Message):
+    """Обработка всех текстовых сообщений"""
     user_id = message.from_user.id
-
-    if user_id not in conversations:
-        conversations[user_id] = []
-
-    conversations[user_id].append({
-        "role": "user",
-        "content": message.text
-    })
-
-    # Лимит истории
-    if len(conversations[user_id]) > 20:
-        conversations[user_id] = conversations[user_id][-20:]
-
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or "Клиент"
+    user_text = message.text
+    
+    # Получаем историю диалога
+    conv = await get_conversation(user_id)
+    
+    if conv:
+        messages = json.loads(conv[0])
+        collected_data = json.loads(conv[1])
+    else:
+        messages = []
+        collected_data = {}
+    
+    # Добавляем сообщение пользователя
+    messages.append({"role": "user", "content": user_text})
+    
+    # Показываем что бот печатает
+    await bot.send_chat_action(message.chat.id, "typing")
+    
+    # Получаем ответ от AI
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT}
-            ] + conversations[user_id],
-            max_tokens=1000,
-            temperature=0.7
+        ai_response = await get_ai_response(messages, collected_data)
+        
+        reply = ai_response.get("reply", "Извините, произошла ошибка. Попробуйте ещё раз.")
+        new_data = ai_response.get("collected_data", {})
+        ready_for_lead = ai_response.get("ready_for_lead", False)
+        lead_score = ai_response.get("lead_score")
+        score_reason = ai_response.get("score_reason")
+        
+        # Обновляем собранные данные
+        for key, value in new_data.items():
+            if value and value not in ["...", "", None, "неизвестно"]:
+                collected_data[key] = value
+        
+        # Добавляем ответ бота в историю
+        messages.append({"role": "assistant", "content": reply})
+        
+        # Сохраняем диалог (храним последние 20 сообщений)
+        await save_conversation(
+            user_id, 
+            username, 
+            first_name, 
+            json.dumps(messages[-20:], ensure_ascii=False), 
+            json.dumps(collected_data, ensure_ascii=False)
         )
-
-        answer = response.choices[0].message.content
-
-        conversations[user_id].append({
-            "role": "assistant",
-            "content": answer
-        })
-
-        # Проверяем заявку
-        if "[ЗАЯВКА]" in answer and "[/ЗАЯВКА]" in answer:
-            start_idx = answer.index("[ЗАЯВКА]")
-            end_idx = answer.index("[/ЗАЯВКА]") + len("[/ЗАЯВКА]")
-            zayavka = answer[start_idx:end_idx]
-
-            clean_answer = answer[:start_idx].strip()
-            await message.answer(clean_answer)
-
-            admin_text = (
-                f"📋 НОВАЯ ЗАЯВКА\n\n"
-                f"👤 @{message.from_user.username or 'нет'}\n"
-                f"🆔 ID: {user_id}\n\n"
-                f"{zayavka}\n\n"
-                f"💬 Написать: tg://user?id={user_id}"
+        
+        # Отправляем ответ клиенту
+        await message.answer(reply)
+        
+        # Если готовы отправлять лид
+        if ready_for_lead and collected_data.get("телефон"):
+            await send_lead_to_admin(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                collected_data=collected_data,
+                lead_score=lead_score,
+                score_reason=score_reason,
+                messages=messages
             )
-            await bot.send_message(ADMIN_ID, admin_text)
-        else:
-            await message.answer(answer)
-
+            
     except Exception as e:
-        await message.answer(
-            "Извините, произошёл сбой. "
-            "Оставьте номер телефона — "
-            "менеджер свяжется с вами!"
+        logger.error(f"Error processing message: {e}")
+        await message.answer("Произошла техническая ошибка. Попробуйте написать ещё раз.")
+
+async def send_lead_to_admin(user_id: int, username: str, first_name: str, 
+                              collected_data: dict, lead_score: str, 
+                              score_reason: str, messages: list):
+    """Отправляем заявку админу"""
+    
+    # Определяем эмодзи для оценки
+    score_emoji = {
+        "горячий": "🔥🔥🔥 ГОРЯЧИЙ",
+        "тёплый": "🟡 ТЁПЛЫЙ", 
+        "теплый": "🟡 ТЁПЛЫЙ",
+        "холодный": "🟢 ХОЛОДНЫЙ"
+    }.get(lead_score.lower() if lead_score else "", "⚪ НЕ ОЦЕНЁН")
+    
+    # Формируем красивое сообщение
+    lead_text = f"""
+{'='*30}
+📋 **НОВАЯ ЗАЯВКА**
+{'='*30}
+
+**Оценка: {score_emoji}**
+📝 Причина: {score_reason or 'не указана'}
+
+👤 **Клиент:**
+• Имя: {collected_data.get('имя', first_name)}
+• Username: @{username if username else 'нет'}
+• Telegram ID: `{user_id}`
+
+📞 **Контакт:**
+• Телефон: {collected_data.get('телефон', '❌ не указан')}
+
+🏠 **Объект:**
+• Тип: {collected_data.get('тип_объекта', 'не указан')}
+• Площадь: {collected_data.get('площадь', 'не указана')}
+• Адрес: {collected_data.get('адрес', 'не указан')}
+
+🔧 **Работы:**
+{collected_data.get('работы', 'не указаны')}
+
+📐 **Чертежи/проект:** {collected_data.get('чертежи', 'не указано')}
+
+💰 **Бюджет:** {collected_data.get('бюджет', 'не указан')}
+
+📅 **Сроки начала:** {collected_data.get('сроки_начала', 'не указаны')}
+
+{'='*30}
+"""
+    
+    try:
+        await bot.send_message(ADMIN_ID, lead_text, parse_mode="Markdown")
+        
+        # Сохраняем лид в базу
+        await save_lead(
+            user_id=user_id,
+            data=json.dumps(collected_data, ensure_ascii=False),
+            score=lead_score or "не оценён",
+            score_reason=score_reason or ""
         )
-        await bot.send_message(
-            ADMIN_ID, f"⚠️ Ошибка:\n{str(e)}"
-        )
-
-
-@dp.message(F.photo | F.document)
-async def handle_files(message: types.Message):
-    await message.answer(
-        "Спасибо за файл! 📎\n"
-        "Передам специалисту.\n"
-        "Расскажите подробнее о проекте?"
-    )
-    await message.forward(ADMIN_ID)
-
-
-# ===== ВЕБ-СЕРВЕР (чтобы Render не усыплял) =====
-
-async def health(request):
-    return web.Response(text="OK")
-
-
-async def run_web():
-    app = web.Application()
-    app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-
-# ===== ЗАПУСК =====
+        
+        logger.info(f"Lead sent to admin: {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to send lead to admin: {e}")
 
 async def main():
-    print("Бот запущен ✅")
-    await run_web()
+    """Запуск бота"""
+    await init_db()
+    logger.info("Bot started!")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
