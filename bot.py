@@ -4,216 +4,196 @@ import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN, ADMIN_ID
-from database import init_db, save_lead
-from ai_handler import make_reply
+from database import init_db, get_conversation, save_conversation, save_lead
+from ai_handler import get_ai_response
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher()
 
-# Состояния диалога
-class Form(StatesGroup):
-    work = State()        # Какие работы
-    object_type = State() # Тип объекта
-    area = State()        # Площадь
-    address = State()     # Адрес
-    timing = State()      # Сроки
-    budget = State()      # Бюджет
-    phone = State()       # Телефон
-    chat = State()        # Свободный чат после заявки
+sent_leads = set()
 
-# Вопросы для каждого шага
-QUESTIONS = {
-    "work": "Какие работы вас интересуют?",
-    "object_type": "Квартира, дом или коммерческое помещение?",
-    "area": "Какая примерно площадь?",
-    "address": "В каком районе/адресе объект?",
-    "timing": "Когда планируете начать работы?",
-    "budget": "Какой примерный бюджет?",
-    "phone": "Оставьте телефон — мастер свяжется для обсуждения деталей 📞",
-}
+def check_required_fields(data: dict) -> tuple:
+    """Проверяет заполнены ли ключевые поля"""
+    
+    # Проверяем разные варианты написания
+    has_phone = bool(data.get("телефон") or data.get("phone") or data.get("тел"))
+    has_work = bool(data.get("работы") or data.get("работа") or data.get("work"))
+    has_area = bool(data.get("площадь") or data.get("area") or data.get("метраж"))
+    has_budget = bool(data.get("бюджет") or data.get("budget"))
+    has_timing = bool(data.get("сроки") or data.get("сроки_начала") or data.get("когда") or data.get("timing"))
+    has_type = bool(data.get("тип_объекта") or data.get("тип") or data.get("объект") or data.get("type"))
+    has_address = bool(data.get("адрес") or data.get("address") or data.get("район"))
+    
+    filled = []
+    missing = []
+    
+    checks = [
+        ("телефон", has_phone),
+        ("работы", has_work),
+        ("площадь", has_area),
+        ("бюджет", has_budget),
+        ("сроки", has_timing),
+        ("тип_объекта", has_type),
+        ("адрес", has_address),
+    ]
+    
+    for name, ok in checks:
+        if ok:
+            filled.append(name)
+        else:
+            missing.append(name)
+    
+    return filled, missing
 
 @dp.message(CommandStart())
-async def start(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(Form.work)
+async def start_handler(message: Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or "Клиент"
     
-    name = message.from_user.first_name or "Клиент"
-    await state.update_data(name=name, username=message.from_user.username or "")
+    await save_conversation(user_id, username, first_name, "[]", "{}")
+    
+    if user_id in sent_leads:
+        sent_leads.remove(user_id)
     
     await message.answer(
-        f"Здравствуйте, {name}! 👋\n\n"
+        f"Здравствуйте, {first_name}! 👋\n\n"
         "Я помощник компании **СтройРемонтНН**.\n\n"
         "Делаем комплексные ремонты в Нижнем Новгороде:\n"
         "• Демонтаж, электрика, сантехника\n"
         "• Перегородки, потолки, плитка\n"
         "• Декоративная отделка\n\n"
-        f"{QUESTIONS['work']} 🏠",
+        "Расскажите, что хотите сделать? 🏠",
         parse_mode="Markdown"
     )
 
-# ===== ШАГ 1: Работы =====
-@dp.message(Form.work)
-async def process_work(message: Message, state: FSMContext):
-    await state.update_data(work=message.text)
-    await state.set_state(Form.object_type)
-    
-    reply = await make_reply(
-        f"Клиент хочет: {message.text}",
-        f"Отреагируй кратко (1 предложение) и спроси: {QUESTIONS['object_type']}"
-    )
-    await message.answer(reply)
-
-# ===== ШАГ 2: Тип объекта =====
-@dp.message(Form.object_type)
-async def process_object(message: Message, state: FSMContext):
-    await state.update_data(object_type=message.text)
-    await state.set_state(Form.area)
-    
-    reply = await make_reply(
-        f"Объект: {message.text}",
-        f"Подтверди кратко и спроси: {QUESTIONS['area']}"
-    )
-    await message.answer(reply)
-
-# ===== ШАГ 3: Площадь =====
-@dp.message(Form.area)
-async def process_area(message: Message, state: FSMContext):
-    await state.update_data(area=message.text)
-    await state.set_state(Form.address)
-    
-    reply = await make_reply(
-        f"Площадь: {message.text}",
-        f"Отреагируй и спроси: {QUESTIONS['address']}"
-    )
-    await message.answer(reply)
-
-# ===== ШАГ 4: Адрес =====
-@dp.message(Form.address)
-async def process_address(message: Message, state: FSMContext):
-    await state.update_data(address=message.text)
-    await state.set_state(Form.timing)
-    
-    reply = await make_reply(
-        f"Адрес: {message.text}",
-        f"Отреагируй и спроси: {QUESTIONS['timing']}"
-    )
-    await message.answer(reply)
-
-# ===== ШАГ 5: Сроки =====
-@dp.message(Form.timing)
-async def process_timing(message: Message, state: FSMContext):
-    await state.update_data(timing=message.text)
-    await state.set_state(Form.budget)
-    
-    reply = await make_reply(
-        f"Сроки: {message.text}",
-        f"Отреагируй и спроси: {QUESTIONS['budget']}"
-    )
-    await message.answer(reply)
-
-# ===== ШАГ 6: Бюджет =====
-@dp.message(Form.budget)
-async def process_budget(message: Message, state: FSMContext):
-    await state.update_data(budget=message.text)
-    await state.set_state(Form.phone)
-    
-    reply = await make_reply(
-        f"Бюджет: {message.text}",
-        f"Скажи что отлично и спроси телефон: {QUESTIONS['phone']}"
-    )
-    await message.answer(reply)
-
-# ===== ШАГ 7: Телефон — ФИНАЛ =====
-@dp.message(Form.phone)
-async def process_phone(message: Message, state: FSMContext):
-    await state.update_data(phone=message.text)
-    
-    # Получаем все данные
-    data = await state.get_data()
+@dp.message(F.text)
+async def message_handler(message: Message):
     user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or "Клиент"
+    user_text = message.text
     
-    logger.info(f"=== FINAL DATA for {user_id} ===")
-    logger.info(f"{data}")
+    conv = await get_conversation(user_id)
     
-    # Отправляем заявку админу
-    await send_lead(user_id, data)
-    
-    # Переходим в режим свободного чата
-    await state.set_state(Form.chat)
-    
-    await message.answer(
-        "Отлично! ✅ Я передал информацию мастеру.\n"
-        "Он свяжется с вами в ближайшее время.\n\n"
-        "Если есть вопросы — пишите, отвечу!"
-    )
-
-# ===== Свободный чат после заявки =====
-@dp.message(Form.chat)
-async def free_chat(message: Message, state: FSMContext):
-    data = await state.get_data()
-    
-    reply = await make_reply(
-        f"Клиент спрашивает: {message.text}",
-        "Ответь как помощник СтройРемонтНН. Кратко, по делу. Если вопрос о цене — скажи что точную цену скажет мастер после осмотра."
-    )
-    await message.answer(reply)
-
-# ===== Отправка заявки =====
-async def send_lead(user_id: int, data: dict):
-    # Оценка клиента
-    budget_text = data.get('budget', '').lower()
-    timing_text = data.get('timing', '').lower()
-    
-    # Простая оценка
-    if any(word in timing_text for word in ['сейчас', 'срочно', 'неделя', 'этом месяце', 'скоро']):
-        status = "✅ ЦЕЛЕВОЙ"
-        reason = "Готов начать скоро"
-    elif any(word in budget_text for word in ['50', '30', '20', '10']) and 'тыс' not in budget_text:
-        status = "❌ НЕЦЕЛЕВОЙ"
-        reason = "Маленький бюджет"
+    if conv:
+        messages = json.loads(conv[0])
+        collected_data = json.loads(conv[1])
     else:
-        status = "⚠️ ПОД ВОПРОСОМ"
-        reason = "Требует уточнения"
+        messages = []
+        collected_data = {}
     
-    tg = f"@{data.get('username')}" if data.get('username') else "нет"
+    if not collected_data.get("имя") and first_name != "Клиент":
+        collected_data["имя"] = first_name
+    
+    messages.append({"role": "user", "content": user_text})
+    
+    await bot.send_chat_action(message.chat.id, "typing")
+    
+    try:
+        ai_response = await get_ai_response(messages, collected_data)
+        
+        reply = ai_response.get("reply", "Ошибка.")
+        new_data = ai_response.get("collected_data", {})
+        lead_status = ai_response.get("lead_status", "под_вопросом")
+        status_reason = ai_response.get("status_reason", "")
+        
+        # Логируем что пришло от AI
+        logger.info(f"AI returned new_data: {new_data}")
+        
+        # Обновляем данные
+        if new_data:
+            for key, value in new_data.items():
+                if value and value not in ["...", "", "неизвестно", None, "не указано"]:
+                    collected_data[key] = value
+                    logger.info(f"Saved: {key} = {value}")
+        
+        messages.append({"role": "assistant", "content": reply})
+        
+        await save_conversation(
+            user_id, username, first_name, 
+            json.dumps(messages[-16:], ensure_ascii=False), 
+            json.dumps(collected_data, ensure_ascii=False)
+        )
+        
+        await message.answer(reply)
+        
+        # Проверяем поля
+        filled, missing = check_required_fields(collected_data)
+        
+        logger.info(f"=== User {user_id} ===")
+        logger.info(f"Collected data: {collected_data}")
+        logger.info(f"Filled: {filled}")
+        logger.info(f"Missing: {missing}")
+        logger.info(f"Already sent: {user_id in sent_leads}")
+        
+        # Отправляем когда ВСЕ собрано
+        if len(missing) == 0 and user_id not in sent_leads:
+            logger.info(f">>> SENDING LEAD for {user_id}")
+            await send_lead_to_admin(
+                user_id, username, first_name, 
+                collected_data, lead_status, status_reason
+            )
+            sent_leads.add(user_id)
+        elif len(missing) > 0:
+            logger.info(f"Not sending yet, missing: {missing}")
+            
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        await message.answer("Что-то пошло не так, попробуйте ещё раз 🙏")
+
+async def send_lead_to_admin(user_id, username, first_name, collected_data, lead_status, status_reason):
+    
+    status_emoji = {
+        "целевой": "✅ ЦЕЛЕВОЙ",
+        "под_вопросом": "⚠️ ПОД ВОПРОСОМ",
+        "нецелевой": "❌ НЕЦЕЛЕВОЙ"
+    }.get(lead_status, "⚠️ ПОД ВОПРОСОМ")
+    
+    # Достаём данные с учётом разных ключей
+    phone = collected_data.get('телефон') or collected_data.get('phone') or 'не указан'
+    work = collected_data.get('работы') or collected_data.get('работа') or '—'
+    obj_type = collected_data.get('тип_объекта') or collected_data.get('тип') or collected_data.get('объект') or '—'
+    area = collected_data.get('площадь') or collected_data.get('метраж') or '—'
+    address = collected_data.get('адрес') or collected_data.get('район') or '—'
+    budget = collected_data.get('бюджет') or '—'
+    timing = collected_data.get('сроки') or collected_data.get('сроки_начала') or collected_data.get('когда') or '—'
+    
+    tg_contact = f"@{username}" if username else "нет"
     
     lead_text = f"""
 {'='*30}
 📋 НОВАЯ ЗАЯВКА
 {'='*30}
 
-{status}
-💬 {reason}
+{status_emoji}
+💬 {status_reason if status_reason else 'Автооценка'}
 
-👤 Имя: {data.get('name', '—')}
-📞 Телефон: {data.get('phone', '—')}
-📱 Telegram: {tg}
+👤 Имя: {collected_data.get('имя', first_name)}
+📞 Телефон: {phone}
+📱 Telegram: {tg_contact}
 🆔 ID: {user_id}
 
-🔧 Работы: {data.get('work', '—')}
-🏠 Объект: {data.get('object_type', '—')}
-📐 Площадь: {data.get('area', '—')}
-📍 Адрес: {data.get('address', '—')}
-📅 Сроки: {data.get('timing', '—')}
-💰 Бюджет: {data.get('budget', '—')}
+🏠 Объект: {obj_type}
+📍 Адрес: {address}
+📐 Площадь: {area}
+🔧 Работы: {work}
+💰 Бюджет: {budget}
+📅 Сроки: {timing}
 {'='*30}
 """
     
     try:
         await bot.send_message(ADMIN_ID, lead_text)
-        await save_lead(user_id, json.dumps(data, ensure_ascii=False), status, reason)
-        logger.info(f"✅ LEAD SENT for {user_id}")
+        await save_lead(user_id, json.dumps(collected_data, ensure_ascii=False), lead_status, status_reason)
+        logger.info(f"✅ LEAD SENT to {ADMIN_ID}")
     except Exception as e:
-        logger.error(f"❌ Failed: {e}")
+        logger.error(f"❌ Failed to send lead: {e}")
 
 async def main():
     await init_db()
