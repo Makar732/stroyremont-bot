@@ -17,20 +17,36 @@ dp = Dispatcher()
 
 sent_leads = set()
 
-# Обязательные поля
-REQUIRED_FIELDS = ["телефон", "работы", "тип_объекта", "площадь", "адрес", "сроки", "бюджет"]
-
 def check_required_fields(data: dict) -> tuple:
-    """Проверяет заполнены ли все обязательные поля"""
+    """Проверяет заполнены ли ключевые поля"""
+    
+    # Проверяем разные варианты написания
+    has_phone = bool(data.get("телефон") or data.get("phone") or data.get("тел"))
+    has_work = bool(data.get("работы") or data.get("работа") or data.get("work"))
+    has_area = bool(data.get("площадь") or data.get("area") or data.get("метраж"))
+    has_budget = bool(data.get("бюджет") or data.get("budget"))
+    has_timing = bool(data.get("сроки") or data.get("сроки_начала") or data.get("когда") or data.get("timing"))
+    has_type = bool(data.get("тип_объекта") or data.get("тип") or data.get("объект") or data.get("type"))
+    has_address = bool(data.get("адрес") or data.get("address") or data.get("район"))
+    
     filled = []
     missing = []
     
-    for field in REQUIRED_FIELDS:
-        value = data.get(field, "")
-        if value and value not in ["", "...", "—", None, "неизвестно"]:
-            filled.append(field)
+    checks = [
+        ("телефон", has_phone),
+        ("работы", has_work),
+        ("площадь", has_area),
+        ("бюджет", has_budget),
+        ("сроки", has_timing),
+        ("тип_объекта", has_type),
+        ("адрес", has_address),
+    ]
+    
+    for name, ok in checks:
+        if ok:
+            filled.append(name)
         else:
-            missing.append(field)
+            missing.append(name)
     
     return filled, missing
 
@@ -87,11 +103,15 @@ async def message_handler(message: Message):
         lead_status = ai_response.get("lead_status", "под_вопросом")
         status_reason = ai_response.get("status_reason", "")
         
+        # Логируем что пришло от AI
+        logger.info(f"AI returned new_data: {new_data}")
+        
         # Обновляем данные
         if new_data:
             for key, value in new_data.items():
-                if value and value not in ["...", "", "неизвестно", None]:
+                if value and value not in ["...", "", "неизвестно", None, "не указано"]:
                     collected_data[key] = value
+                    logger.info(f"Saved: {key} = {value}")
         
         messages.append({"role": "assistant", "content": reply})
         
@@ -103,22 +123,28 @@ async def message_handler(message: Message):
         
         await message.answer(reply)
         
-        # Проверяем все ли поля собраны
+        # Проверяем поля
         filled, missing = check_required_fields(collected_data)
         
-        logger.info(f"User {user_id}: filled={filled}, missing={missing}")
+        logger.info(f"=== User {user_id} ===")
+        logger.info(f"Collected data: {collected_data}")
+        logger.info(f"Filled: {filled}")
+        logger.info(f"Missing: {missing}")
+        logger.info(f"Already sent: {user_id in sent_leads}")
         
-        # Отправляем заявку только когда ВСЕ поля заполнены
+        # Отправляем когда ВСЕ собрано
         if len(missing) == 0 and user_id not in sent_leads:
-            logger.info(f"All fields collected! Sending lead for user {user_id}")
+            logger.info(f">>> SENDING LEAD for {user_id}")
             await send_lead_to_admin(
                 user_id, username, first_name, 
                 collected_data, lead_status, status_reason
             )
             sent_leads.add(user_id)
+        elif len(missing) > 0:
+            logger.info(f"Not sending yet, missing: {missing}")
             
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Error: {e}", exc_info=True)
         await message.answer("Что-то пошло не так, попробуйте ещё раз 🙏")
 
 async def send_lead_to_admin(user_id, username, first_name, collected_data, lead_status, status_reason):
@@ -129,7 +155,15 @@ async def send_lead_to_admin(user_id, username, first_name, collected_data, lead
         "нецелевой": "❌ НЕЦЕЛЕВОЙ"
     }.get(lead_status, "⚠️ ПОД ВОПРОСОМ")
     
-    phone = collected_data.get('телефон', '')
+    # Достаём данные с учётом разных ключей
+    phone = collected_data.get('телефон') or collected_data.get('phone') or 'не указан'
+    work = collected_data.get('работы') or collected_data.get('работа') or '—'
+    obj_type = collected_data.get('тип_объекта') or collected_data.get('тип') or collected_data.get('объект') or '—'
+    area = collected_data.get('площадь') or collected_data.get('метраж') or '—'
+    address = collected_data.get('адрес') or collected_data.get('район') or '—'
+    budget = collected_data.get('бюджет') or '—'
+    timing = collected_data.get('сроки') or collected_data.get('сроки_начала') or collected_data.get('когда') or '—'
+    
     tg_contact = f"@{username}" if username else "нет"
     
     lead_text = f"""
@@ -145,19 +179,19 @@ async def send_lead_to_admin(user_id, username, first_name, collected_data, lead
 📱 Telegram: {tg_contact}
 🆔 ID: {user_id}
 
-🏠 Объект: {collected_data.get('тип_объекта', '—')}
-📍 Адрес: {collected_data.get('адрес', '—')}
-📐 Площадь: {collected_data.get('площадь', '—')}
-🔧 Работы: {collected_data.get('работы', '—')}
-💰 Бюджет: {collected_data.get('бюджет', '—')}
-📅 Сроки: {collected_data.get('сроки', '—')}
+🏠 Объект: {obj_type}
+📍 Адрес: {address}
+📐 Площадь: {area}
+🔧 Работы: {work}
+💰 Бюджет: {budget}
+📅 Сроки: {timing}
 {'='*30}
 """
     
     try:
         await bot.send_message(ADMIN_ID, lead_text)
         await save_lead(user_id, json.dumps(collected_data, ensure_ascii=False), lead_status, status_reason)
-        logger.info(f"✅ Lead sent: {user_id} [{lead_status}]")
+        logger.info(f"✅ LEAD SENT to {ADMIN_ID}")
     except Exception as e:
         logger.error(f"❌ Failed to send lead: {e}")
 
