@@ -6,32 +6,38 @@ from config import OPENROUTER_API_KEY, COMPANY_INFO
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""Ты — дружелюбный помощник компании СтройРемонтНН. Общайся как живой человек, не как робот.
+SYSTEM_PROMPT = f"""Ты — дружелюбный помощник компании СтройРемонтНН. Общайся как живой человек.
 
 {COMPANY_INFO}
 
-ТВОЙ СТИЛЬ:
-- Дружелюбно, но профессионально
-- Короткие ответы (2-3 предложения)
-- Можно использовать эмодзи, но умеренно
-- Отвечай на вопросы клиента, потом задавай свой
-- Проявляй интерес к проекту клиента
+СТИЛЬ:
+- Дружелюбно и профессионально
+- 2-3 предложения максимум
+- Реагируй на слова клиента, не игнорируй
+- Эмодзи умеренно
 
-ТВОЯ ЦЕЛЬ:
-Узнать: что нужно сделать → объём → сроки → бюджет → телефон
+ЦЕЛЬ — собрать ВСЕ данные:
+1. Что нужно сделать (работы)
+2. Тип объекта (квартира/дом/коммерция)
+3. Площадь (кв.м)
+4. Адрес или район
+5. Сроки начала
+6. Бюджет
+7. Телефон
 
-НО! Не делай допрос. Веди живой разговор. Если клиент что-то рассказывает — реагируй на это.
+Спрашивай естественно, по ходу разговора. Не все сразу.
 
 ВАЖНО:
-- Мелкие работы (замена крана, одна розетка) — вежливо говори что работаем с более крупными проектами
-- Если бюджет меньше 100к — мягко уточни, может клиент имел в виду что-то другое
-- Цены называй как ориентир, точную стоимость скажет мастер после осмотра
+- Мелкие работы — вежливо говори что работаем с крупными проектами
+- Цены называй как ориентир
 
-ОТВЕТ JSON:
-{{"reply":"твой живой ответ","collected_data":{{"имя":"","телефон":"","тип_объекта":"","площадь":"","работы":"","бюджет":"","сроки":""}},"ready_for_lead":false,"lead_status":"none","status_reason":""}}
+ОТВЕТ СТРОГО JSON:
+{{"reply":"ответ","collected_data":{{"телефон":"","работы":"","тип_объекта":"","площадь":"","адрес":"","сроки":"","бюджет":""}},"lead_status":"none","status_reason":""}}
 
-lead_status: "целевой" / "под_вопросом" / "нецелевой"
-ready_for_lead=true когда получил телефон ИЛИ понял что клиент нецелевой
+lead_status:
+- "целевой" — бюджет от 100к, крупная работа, адекватные сроки
+- "под_вопросом" — потенциал есть, но что-то смущает
+- "нецелевой" — мелочь, бюджет <100к, торгуется, "просто узнать"
 """
 
 def extract_json(text: str) -> dict:
@@ -45,18 +51,16 @@ def extract_json(text: str) -> dict:
     return None
 
 async def get_ai_response(messages: list, collected_data: dict) -> dict:
-    # Берём последние 8 сообщений для баланса памяти и токенов
     recent_messages = messages[-8:] if len(messages) > 8 else messages
     
     context = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    # Передаём собранные данные чтобы не забывал
     if collected_data:
-        data_summary = ", ".join([f"{k}: {v}" for k, v in collected_data.items() if v and v not in ["", "..."]])
+        data_summary = ", ".join([f"{k}: {v}" for k, v in collected_data.items() if v and v not in ["", "...", None]])
         if data_summary:
             context.append({
                 "role": "system", 
-                "content": f"Уже знаешь о клиенте: {data_summary}"
+                "content": f"Уже знаешь: {data_summary}. Не спрашивай это повторно!"
             })
     
     context.extend(recent_messages)
@@ -82,7 +86,7 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 
                 if "error" in result:
                     logger.error(f"API error: {result['error']}")
-                    return {"reply": "Секунду, что-то пошло не так. Напишите ещё раз 🙏", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
+                    return {"reply": "Секунду, что-то пошло не так. Напишите ещё раз 🙏", "collected_data": {}, "lead_status": "none", "status_reason": ""}
                 
                 content = result["choices"][0]["message"]["content"]
                 logger.info(f"AI: {content[:150]}...")
@@ -92,16 +96,14 @@ async def get_ai_response(messages: list, collected_data: dict) -> dict:
                 if parsed and "reply" in parsed:
                     return parsed
                 else:
-                    # Если JSON не распарсился, возвращаем текст без JSON части
                     clean_reply = content.split("{")[0].strip() if "{" in content else content
                     return {
                         "reply": clean_reply,
                         "collected_data": {},
-                        "ready_for_lead": False,
                         "lead_status": "none",
                         "status_reason": ""
                     }
                 
     except Exception as e:
         logger.error(f"Error: {e}")
-        return {"reply": "Упс, технический сбой. Попробуйте ещё раз!", "collected_data": {}, "ready_for_lead": False, "lead_status": "none", "status_reason": ""}
+        return {"reply": "Упс, технический сбой. Попробуйте ещё раз!", "collected_data": {}, "lead_status": "none", "status_reason": ""}
