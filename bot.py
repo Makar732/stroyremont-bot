@@ -17,6 +17,23 @@ dp = Dispatcher()
 
 sent_leads = set()
 
+# Обязательные поля
+REQUIRED_FIELDS = ["телефон", "работы", "тип_объекта", "площадь", "адрес", "сроки", "бюджет"]
+
+def check_required_fields(data: dict) -> tuple:
+    """Проверяет заполнены ли все обязательные поля"""
+    filled = []
+    missing = []
+    
+    for field in REQUIRED_FIELDS:
+        value = data.get(field, "")
+        if value and value not in ["", "...", "—", None, "неизвестно"]:
+            filled.append(field)
+        else:
+            missing.append(field)
+    
+    return filled, missing
+
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     user_id = message.from_user.id
@@ -55,7 +72,6 @@ async def message_handler(message: Message):
         messages = []
         collected_data = {}
     
-    # Добавляем имя в данные если его ещё нет
     if not collected_data.get("имя") and first_name != "Клиент":
         collected_data["имя"] = first_name
     
@@ -68,8 +84,7 @@ async def message_handler(message: Message):
         
         reply = ai_response.get("reply", "Ошибка.")
         new_data = ai_response.get("collected_data", {})
-        ready_for_lead = ai_response.get("ready_for_lead", False)
-        lead_status = ai_response.get("lead_status", "none")
+        lead_status = ai_response.get("lead_status", "под_вопросом")
         status_reason = ai_response.get("status_reason", "")
         
         # Обновляем данные
@@ -80,7 +95,6 @@ async def message_handler(message: Message):
         
         messages.append({"role": "assistant", "content": reply})
         
-        # Сохраняем последние 16 сообщений для памяти
         await save_conversation(
             user_id, username, first_name, 
             json.dumps(messages[-16:], ensure_ascii=False), 
@@ -89,10 +103,14 @@ async def message_handler(message: Message):
         
         await message.answer(reply)
         
-        # Отправляем лид
-        has_contact = collected_data.get("телефон") or username
+        # Проверяем все ли поля собраны
+        filled, missing = check_required_fields(collected_data)
         
-        if ready_for_lead and has_contact and user_id not in sent_leads:
+        logger.info(f"User {user_id}: filled={filled}, missing={missing}")
+        
+        # Отправляем заявку только когда ВСЕ поля заполнены
+        if len(missing) == 0 and user_id not in sent_leads:
+            logger.info(f"All fields collected! Sending lead for user {user_id}")
             await send_lead_to_admin(
                 user_id, username, first_name, 
                 collected_data, lead_status, status_reason
@@ -109,25 +127,26 @@ async def send_lead_to_admin(user_id, username, first_name, collected_data, lead
         "целевой": "✅ ЦЕЛЕВОЙ",
         "под_вопросом": "⚠️ ПОД ВОПРОСОМ",
         "нецелевой": "❌ НЕЦЕЛЕВОЙ"
-    }.get(lead_status, "❓ НЕ ОПРЕДЕЛЁН")
+    }.get(lead_status, "⚠️ ПОД ВОПРОСОМ")
     
     phone = collected_data.get('телефон', '')
     tg_contact = f"@{username}" if username else "нет"
     
     lead_text = f"""
 {'='*30}
-📋 ЗАЯВКА
+📋 НОВАЯ ЗАЯВКА
 {'='*30}
 
 {status_emoji}
-💬 {status_reason if status_reason else 'Причина не указана'}
+💬 {status_reason if status_reason else 'Автооценка'}
 
 👤 Имя: {collected_data.get('имя', first_name)}
-📞 Телефон: {phone if phone else 'не указан'}
+📞 Телефон: {phone}
 📱 Telegram: {tg_contact}
 🆔 ID: {user_id}
 
 🏠 Объект: {collected_data.get('тип_объекта', '—')}
+📍 Адрес: {collected_data.get('адрес', '—')}
 📐 Площадь: {collected_data.get('площадь', '—')}
 🔧 Работы: {collected_data.get('работы', '—')}
 💰 Бюджет: {collected_data.get('бюджет', '—')}
@@ -138,9 +157,9 @@ async def send_lead_to_admin(user_id, username, first_name, collected_data, lead
     try:
         await bot.send_message(ADMIN_ID, lead_text)
         await save_lead(user_id, json.dumps(collected_data, ensure_ascii=False), lead_status, status_reason)
-        logger.info(f"Lead sent: {user_id} [{lead_status}]")
+        logger.info(f"✅ Lead sent: {user_id} [{lead_status}]")
     except Exception as e:
-        logger.error(f"Failed to send lead: {e}")
+        logger.error(f"❌ Failed to send lead: {e}")
 
 async def main():
     await init_db()
