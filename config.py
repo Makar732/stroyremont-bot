@@ -1,11 +1,8 @@
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
-
-BOT_TOKEN = 8573569401:AAHGZTU5IF2DEkVqmHhBvf0g-KLAeQCkKro
-ADMIN_ID = 7451333839 # твой ID числом, узнай через @userinfobot
-OPENROUTER_API_KEY = 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
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 COMPANY_INFO = """
 Компания: СтройРемонтНН
@@ -25,3 +22,14 @@ COMPANY_INFO = """
 - Демонтаж: 300–600 руб/м²
 - Комплексный ремонт: 6000–10000 руб/м²
 """
+
+
+# Проверка при запуске
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN not set!")
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY not set!")
+if ADMIN_ID == 0:
+    raise ValueError("ADMIN_ID not set!")
+
+print(f"✅ Config loaded: ADMIN_ID={ADMIN_ID}")
