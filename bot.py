@@ -201,3 +201,45 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+@dp.message(Command("testai"))
+async def test_ai(message: Message):
+    """Тест OpenRouter API"""
+    import aiohttp
+    from config import OPENROUTER_API_KEY
+    
+    await message.answer("⏳ Тестирую OpenRouter...")
+    
+    logger.info(f"🔑 Key starts with: {OPENROUTER_API_KEY[:25] if OPENROUTER_API_KEY else 'EMPTY'}...")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "Скажи привет"}],
+                    "max_tokens": 50
+                }
+            ) as response:
+                status = response.status
+                result = await response.json()
+                
+                logger.info(f"Status: {status}")
+                logger.info(f"Response: {result}")
+                
+                if "error" in result:
+                    await message.answer(f"❌ Ошибка API:\n`{result['error']}`", parse_mode="Markdown")
+                elif "choices" in result:
+                    reply = result["choices"][0]["message"]["content"]
+                    await message.answer(f"✅ AI работает!\n\nОтвет: {reply}")
+                else:
+                    await message.answer(f"❓ Странный ответ:\n`{str(result)[:500]}`", parse_mode="Markdown")
+                    
+    except Exception as e:
+        logger.error(f"Test error: {e}")
+        await message.answer(f"❌ Ошибка: {type(e).__name__}: {e}")
