@@ -7,7 +7,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Проверка при запуске
 print(f"=== CONFIG LOADED ===")
 print(f"ADMIN_ID: {ADMIN_ID}")
 print(f"BOT_TOKEN exists: {bool(BOT_TOKEN)}")
@@ -37,12 +36,23 @@ COMPANY_INFO = """
 - Комплексный ремонт: 6000-10000 руб/м²
 """
 
-# Поля которые нужно собрать
-REQUIRED_FIELDS = {
-    "work": "какие работы нужны",
-    "object_type": "тип объекта (квартира/дом/коммерция)",
-    "area": "площадь объекта",
-    "address": "район или адрес",
-    "timing": "сроки начала работ",
-    "budget": "примерный бюджет"
+# Обязательные поля - порядок важен!
+REQUIRED_FIELDS = ["work", "object_type", "area", "address", "timing", "budget"]
+
+FIELD_NAMES = {
+    "work": "Работы",
+    "object_type": "Тип объекта",
+    "area": "Площадь",
+    "address": "Адрес/район",
+    "timing": "Сроки",
+    "budget": "Бюджет"
+}
+
+FIELD_QUESTIONS = {
+    "work": "Какие работы вас интересуют? 🔨",
+    "object_type": "Это квартира, дом или коммерческое помещение? 🏠",
+    "area": "Какая примерно площадь объекта? 📐",
+    "address": "В каком районе находится объект? 📍",
+    "timing": "Когда планируете начать работы? 📅",
+    "budget": "Какой примерный бюджет? 💰"
 }
