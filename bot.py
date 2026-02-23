@@ -12,7 +12,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import BOT_TOKEN, ADMIN_ID, MASTER_PHONE, SERVICES, OBJECTS, AREAS, TIMINGS
+from config import (
+    BOT_TOKEN, ADMIN_ID, MASTER_PHONE, MASTER_WHATSAPP,
+    SERVICES, OBJECTS, AREAS, TIMINGS, FAQ
+)
 from database import init_db, save_lead
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,140 +27,207 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # === СОСТОЯНИЯ ===
 class Form(StatesGroup):
-    service = State()      # Выбор услуги
-    object_type = State()  # Тип объекта
-    area = State()         # Площадь
-    timing = State()       # Сроки
-    price_check = State()  # Проверка бюджета
-    phone = State()        # Телефон
-    done = State()         # Завершено
+    main_menu = State()
+    service = State()
+    object_type = State()
+    area = State()
+    timing = State()
+    price_check = State()
+    contact = State()
+    faq = State()
+
+
+# === КНОПКИ НАВИГАЦИИ ===
+BTN_BACK_CATALOG = "⬅️ Каталог услуг"
+BTN_BACK = "⬅️ Назад"
+BTN_HOME = "🏠 Главное меню"
+BTN_FAQ = "❓ Частые вопросы"
 
 
 # === КЛАВИАТУРЫ ===
 
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Главное меню"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔧 Выбрать услугу")],
+            [KeyboardButton(text=BTN_FAQ)],
+        ],
+        resize_keyboard=True
+    )
+
+
 def services_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура услуг"""
-    buttons = [[KeyboardButton(text=s["button"])] for s in SERVICES.values()]
+    """Каталог услуг"""
+    buttons = []
+    for key, s in SERVICES.items():
+        buttons.append([KeyboardButton(text=f"{s['emoji']} {s['name']} — {s['price']}")])
+    buttons.append([KeyboardButton(text=BTN_HOME)])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
 def objects_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура типов объектов"""
-    buttons = [[KeyboardButton(text=v)] for v in OBJECTS.values()]
+    """Тип объекта"""
+    buttons = [[KeyboardButton(text=f"{o['emoji']} {o['name']}")] for o in OBJECTS.values()]
+    buttons.append([KeyboardButton(text=BTN_BACK_CATALOG), KeyboardButton(text=BTN_HOME)])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
 def areas_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура площадей"""
-    buttons = [[KeyboardButton(text=v)] for v in AREAS.values()]
+    """Площадь"""
+    buttons = [[KeyboardButton(text=f"{a['emoji']} {a['name']}")] for a in AREAS.values()]
+    buttons.append([KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_HOME)])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
 def timings_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура сроков"""
-    buttons = [[KeyboardButton(text=v)] for v in TIMINGS.values()]
+    """Сроки"""
+    buttons = [[KeyboardButton(text=f"{t['emoji']} {t['name']}")] for t in TIMINGS.values()]
+    buttons.append([KeyboardButton(text=BTN_BACK), KeyboardButton(text=BTN_HOME)])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
 def price_check_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура проверки цены"""
+    """Подтверждение цены"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="✅ Да, подходит")],
-            [KeyboardButton(text="❌ Нет, дорого")]
+            [KeyboardButton(text="✅ Да, подходит!")],
+            [KeyboardButton(text="❌ Хочу посмотреть другое")],
+            [KeyboardButton(text=BTN_HOME)]
         ],
         resize_keyboard=True
     )
 
 
-def phone_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура для телефона"""
+def contact_keyboard() -> ReplyKeyboardMarkup:
+    """Контакт мастера"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📞 Отправить мой номер", request_contact=True)],
-            [KeyboardButton(text="⏭ Пропустить, просто дайте контакт мастера")]
+            [KeyboardButton(text="📞 Позвонить мастеру")],
+            [KeyboardButton(text="💬 Написать в WhatsApp")],
+            [KeyboardButton(text="🔧 Заказать другую услугу")],
+            [KeyboardButton(text=BTN_HOME)]
         ],
         resize_keyboard=True
     )
 
 
-def other_services_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура для выбора другой услуги"""
+def faq_keyboard() -> ReplyKeyboardMarkup:
+    """FAQ"""
+    buttons = [[KeyboardButton(text=f["question"])] for f in FAQ.values()]
+    buttons.append([KeyboardButton(text=BTN_HOME)])
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+
+def back_to_services_keyboard() -> ReplyKeyboardMarkup:
+    """После отказа от цены"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔄 Посмотреть другие услуги")],
-            [KeyboardButton(text="👋 Завершить")]
+            [KeyboardButton(text=BTN_HOME)]
         ],
         resize_keyboard=True
     )
 
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+# === ВСПОМОГАТЕЛЬНЫЕ ===
 
-def get_service_by_button(text: str) -> dict | None:
+def get_service_by_text(text: str) -> dict | None:
     """Находит услугу по тексту кнопки"""
-    for key, service in SERVICES.items():
-        if service["button"] in text or service["name"] in text:
-            return {"key": key, **service}
+    for key, s in SERVICES.items():
+        if s["name"] in text:
+            return {"key": key, **s}
     return None
 
 
-def get_service_key(text: str) -> str:
-    """Получает ключ услуги"""
-    for key, service in SERVICES.items():
-        if service["button"] in text or service["name"] in text:
-            return key
-    return "unknown"
+def get_name(message: Message) -> str:
+    """Получает имя пользователя"""
+    return message.from_user.first_name or "друг"
 
 
-# === КОМАНДЫ ===
+# === ГЛАВНОЕ МЕНЮ ===
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Начало диалога"""
-    
+    """Старт"""
     await state.clear()
     
-    name = message.from_user.first_name or "Клиент"
+    name = get_name(message)
     username = message.from_user.username or ""
     
-    await state.update_data(
-        name=name,
-        username=username
-    )
+    await state.update_data(name=name, username=username)
+    await state.set_state(Form.main_menu)
     
     logger.info(f"START: {message.from_user.id} ({name})")
     
+    await message.answer(
+        f"Привет, {name}! 👋\n\n"
+        "Я — бот **СтройРемонтНН**\n\n"
+        "🏆 Ремонт в Нижнем Новгороде\n"
+        "📋 Гарантия 5 лет\n"
+        "⚡ Мастер ответит за 30 минут\n\n"
+        "Чем могу помочь?",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
+    )
+
+
+@dp.message(F.text == BTN_HOME)
+async def go_home(message: Message, state: FSMContext):
+    """Возврат в главное меню"""
+    
+    data = await state.get_data()
+    name = data.get("name", get_name(message))
+    
+    await state.set_state(Form.main_menu)
+    
+    await message.answer(
+        f"🏠 Главное меню\n\n"
+        f"Что будем делать, {name}?",
+        reply_markup=main_menu_keyboard()
+    )
+
+
+@dp.message(Form.main_menu, F.text.contains("Выбрать услугу"))
+async def show_services(message: Message, state: FSMContext):
+    """Показать каталог"""
     await state.set_state(Form.service)
     
     await message.answer(
-        f"Здравствуйте, {name}! 👋\n\n"
-        "Я — бот компании **СтройРемонтНН**.\n\n"
-        "🏆 Ремонт в Нижнем Новгороде\n"
-        "📋 Гарантия 5 лет на все работы\n\n"
-        "Выберите интересующую услугу:",
+        "🔧 **Наши услуги:**\n\n"
+        "Выберите, что вас интересует 👇",
         parse_mode="Markdown",
         reply_markup=services_keyboard()
     )
 
 
-@dp.message(Command("reset"))
-async def cmd_reset(message: Message, state: FSMContext):
-    """Сброс диалога"""
-    await state.clear()
-    await message.answer("♻️ Сброшено. Нажмите /start", reply_markup=ReplyKeyboardRemove())
+# === КАТАЛОГ УСЛУГ ===
 
+@dp.message(F.text == BTN_BACK_CATALOG)
+async def back_to_catalog(message: Message, state: FSMContext):
+    """Возврат в каталог"""
+    await state.set_state(Form.service)
+    
+    await message.answer(
+        "🔧 **Каталог услуг**\n\n"
+        "Выберите услугу:",
+        parse_mode="Markdown",
+        reply_markup=services_keyboard()
+    )
 
-# === ШАГ 1: ВЫБОР УСЛУГИ ===
 
 @dp.message(Form.service)
 async def process_service(message: Message, state: FSMContext):
-    """Обработка выбора услуги"""
+    """Выбор услуги"""
     
-    service = get_service_by_button(message.text)
+    if message.text == BTN_HOME:
+        await go_home(message, state)
+        return
+    
+    service = get_service_by_text(message.text)
     
     if not service:
-        await message.answer("Пожалуйста, выберите услугу из списка 👇", reply_markup=services_keyboard())
+        await message.answer("Выбери услугу из списка 👇", reply_markup=services_keyboard())
         return
     
     logger.info(f"SERVICE: {message.from_user.id} -> {service['name']}")
@@ -165,32 +235,38 @@ async def process_service(message: Message, state: FSMContext):
     await state.update_data(
         service=service["name"],
         service_key=service["key"],
-        service_price=service["price"]
+        service_price=service["price"],
+        service_emoji=service["emoji"]
     )
     
     await state.set_state(Form.object_type)
     
-    # Показываем экспертный комментарий и следующий вопрос
     await message.answer(
-        f"✅ **{service['name']}** — {service['price']}\n\n"
-        f"{service['comment']}\n\n"
+        f"{service['emoji']} **{service['name']}** — {service['price']}\n\n"
+        f"💬 _{service['comment']}_\n\n"
         "Какой у вас объект?",
         parse_mode="Markdown",
         reply_markup=objects_keyboard()
     )
 
 
-# === ШАГ 2: ТИП ОБЪЕКТА ===
+# === ТИП ОБЪЕКТА ===
 
 @dp.message(Form.object_type)
 async def process_object(message: Message, state: FSMContext):
-    """Обработка типа объекта"""
+    """Тип объекта"""
+    
+    if message.text == BTN_HOME:
+        await go_home(message, state)
+        return
+    if message.text == BTN_BACK_CATALOG:
+        await back_to_catalog(message, state)
+        return
     
     # Проверяем валидность
-    valid = any(v in message.text for v in OBJECTS.values())
-    
+    valid = any(o["name"] in message.text for o in OBJECTS.values())
     if not valid:
-        await message.answer("Выберите тип объекта 👇", reply_markup=objects_keyboard())
+        await message.answer("Выбери тип объекта 👇", reply_markup=objects_keyboard())
         return
     
     logger.info(f"OBJECT: {message.from_user.id} -> {message.text}")
@@ -199,22 +275,29 @@ async def process_object(message: Message, state: FSMContext):
     await state.set_state(Form.area)
     
     await message.answer(
-        "Отлично! 👍\n\n"
+        "👍 Отлично!\n\n"
         "Какая примерная площадь?",
         reply_markup=areas_keyboard()
     )
 
 
-# === ШАГ 3: ПЛОЩАДЬ ===
+# === ПЛОЩАДЬ ===
 
 @dp.message(Form.area)
 async def process_area(message: Message, state: FSMContext):
-    """Обработка площади"""
+    """Площадь"""
     
-    valid = any(v in message.text for v in AREAS.values())
+    if message.text == BTN_HOME:
+        await go_home(message, state)
+        return
+    if message.text == BTN_BACK:
+        await state.set_state(Form.object_type)
+        await message.answer("Какой тип объекта?", reply_markup=objects_keyboard())
+        return
     
+    valid = any(a["name"] in message.text for a in AREAS.values())
     if not valid:
-        await message.answer("Выберите площадь 👇", reply_markup=areas_keyboard())
+        await message.answer("Выбери площадь 👇", reply_markup=areas_keyboard())
         return
     
     logger.info(f"AREA: {message.from_user.id} -> {message.text}")
@@ -223,22 +306,29 @@ async def process_area(message: Message, state: FSMContext):
     await state.set_state(Form.timing)
     
     await message.answer(
-        "Понял! 📐\n\n"
-        "Когда планируете начать работы?",
+        "📐 Записал!\n\n"
+        "Когда планируете начать?",
         reply_markup=timings_keyboard()
     )
 
 
-# === ШАГ 4: СРОКИ ===
+# === СРОКИ ===
 
 @dp.message(Form.timing)
 async def process_timing(message: Message, state: FSMContext):
-    """Обработка сроков"""
+    """Сроки"""
     
-    valid = any(v in message.text for v in TIMINGS.values())
+    if message.text == BTN_HOME:
+        await go_home(message, state)
+        return
+    if message.text == BTN_BACK:
+        await state.set_state(Form.area)
+        await message.answer("Какая площадь?", reply_markup=areas_keyboard())
+        return
     
+    valid = any(t["name"] in message.text for t in TIMINGS.values())
     if not valid:
-        await message.answer("Выберите сроки 👇", reply_markup=timings_keyboard())
+        await message.answer("Выбери сроки 👇", reply_markup=timings_keyboard())
         return
     
     logger.info(f"TIMING: {message.from_user.id} -> {message.text}")
@@ -246,177 +336,166 @@ async def process_timing(message: Message, state: FSMContext):
     await state.update_data(timing=message.text)
     await state.set_state(Form.price_check)
     
-    # Получаем данные для показа цены
     data = await state.get_data()
     
     await message.answer(
         f"📋 **Ваш запрос:**\n\n"
-        f"🔧 {data.get('service')}\n"
+        f"{data.get('service_emoji', '🔧')} {data.get('service')}\n"
         f"🏠 {data.get('object_type')}\n"
         f"📐 {data.get('area')}\n"
         f"📅 {data.get('timing')}\n\n"
-        f"💰 **Цена работ: {data.get('service_price')}**\n\n"
-        "Вам подходят эти условия?",
+        f"💰 **Стоимость работ: {data.get('service_price')}**\n\n"
+        "Вам подходит? 👇",
         parse_mode="Markdown",
         reply_markup=price_check_keyboard()
     )
 
 
-# === ШАГ 5: ПРОВЕРКА ЦЕНЫ ===
+# === ПРОВЕРКА ЦЕНЫ ===
 
 @dp.message(Form.price_check)
 async def process_price_check(message: Message, state: FSMContext):
-    """Проверка согласия с ценой"""
+    """Подтверждение цены"""
+    
+    if message.text == BTN_HOME:
+        await go_home(message, state)
+        return
     
     text = message.text.lower()
     
     if "да" in text or "✅" in text or "подходит" in text:
-        # Цена устраивает — просим контакт
+        # Цена ОК — показываем контакт
         logger.info(f"PRICE OK: {message.from_user.id}")
         
-        await state.update_data(price_accepted=True)
-        await state.set_state(Form.phone)
+        await state.update_data(price_accepted=True, status="COMPLETED")
+        
+        data = await state.get_data()
+        await save_lead(message.from_user.id, data)
+        await send_to_admin(message.from_user.id, data)
+        
+        await state.set_state(Form.contact)
         
         await message.answer(
-            "Отлично! 🎉\n\n"
-            "Оставьте ваш номер телефона, чтобы мастер мог связаться и обсудить детали.\n\n"
-            "Или нажмите «Пропустить», чтобы сразу получить контакт мастера:",
-            reply_markup=phone_keyboard()
+            "🎉 **Отлично!**\n\n"
+            f"📞 **Телефон мастера:**\n`{MASTER_PHONE}`\n\n"
+            "Мастер ответит в течение 30 минут.\n"
+            "Можете позвонить или написать в WhatsApp 👇",
+            parse_mode="Markdown",
+            reply_markup=contact_keyboard()
         )
         
-    elif "нет" in text or "❌" in text or "дорого" in text:
-        # Цена не устраивает
+    elif "нет" in text or "❌" in text or "другое" in text:
+        # Цена не подошла
         logger.info(f"PRICE NO: {message.from_user.id}")
         
-        await state.update_data(price_accepted=False)
+        await state.update_data(price_accepted=False, status="PRICE_REJECTED")
+        
+        data = await state.get_data()
+        await save_lead(message.from_user.id, data)
         
         await message.answer(
             "Понимаю! 🤝\n\n"
-            "Эти цены минимальные для качественной работы с гарантией.\n\n"
-            "Могу показать другие услуги — возможно, что-то подойдёт лучше:",
-            reply_markup=other_services_keyboard()
+            "Это минимальные цены для качественной работы с гарантией.\n\n"
+            "Могу показать другие услуги — возможно, что-то подойдёт лучше 👇",
+            reply_markup=back_to_services_keyboard()
         )
         
-        # Сохраняем отказ в БД для аналитики
-        data = await state.get_data()
-        data["status"] = "PRICE_REJECTED"
-        await save_lead(message.from_user.id, data)
-        
     else:
-        await message.answer("Выберите вариант 👇", reply_markup=price_check_keyboard())
+        await message.answer("Выбери вариант 👇", reply_markup=price_check_keyboard())
 
-
-# === ОБРАБОТКА "ДРУГИЕ УСЛУГИ" ===
 
 @dp.message(F.text == "🔄 Посмотреть другие услуги")
-async def show_other_services(message: Message, state: FSMContext):
-    """Возврат к выбору услуг"""
-    
-    await state.set_state(Form.service)
-    
-    await message.answer(
-        "Выберите другую услугу:",
-        reply_markup=services_keyboard()
-    )
+async def other_services(message: Message, state: FSMContext):
+    """Другие услуги после отказа"""
+    await back_to_catalog(message, state)
 
 
-@dp.message(F.text == "👋 Завершить")
-async def finish_dialog(message: Message, state: FSMContext):
-    """Завершение без заказа"""
-    
-    await state.clear()
-    
-    await message.answer(
-        "Спасибо за интерес! 👋\n\n"
-        "Если передумаете — напишите /start",
-        reply_markup=ReplyKeyboardRemove()
-    )
+@dp.message(F.text == "🔧 Заказать другую услугу")
+async def another_service(message: Message, state: FSMContext):
+    """Другая услуга после контакта"""
+    await back_to_catalog(message, state)
 
 
-# === ШАГ 6: ТЕЛЕФОН ===
+# === КОНТАКТ МАСТЕРА ===
 
-@dp.message(Form.phone, F.contact)
-async def process_phone_contact(message: Message, state: FSMContext):
-    """Телефон через контакт"""
+@dp.message(Form.contact)
+async def process_contact(message: Message, state: FSMContext):
+    """Действия с контактом"""
     
-    phone = message.contact.phone_number
-    if not phone.startswith("+"):
-        phone = "+" + phone
+    if message.text == BTN_HOME:
+        await go_home(message, state)
+        return
     
-    logger.info(f"PHONE: {message.from_user.id} -> {phone}")
-    
-    await finish_order(message, state, phone)
-
-
-@dp.message(Form.phone, F.text.contains("Пропустить"))
-async def skip_phone(message: Message, state: FSMContext):
-    """Пропуск телефона — сразу даё�� контакт мастера"""
-    
-    logger.info(f"PHONE SKIP: {message.from_user.id}")
-    
-    await finish_order(message, state, None)
-
-
-@dp.message(Form.phone)
-async def process_phone_text(message: Message, state: FSMContext):
-    """Телефон текстом"""
-    
-    import re
-    clean = re.sub(r'[\s\-\(\)\+]', '', message.text)
-    
-    if re.search(r'\d{10,11}', clean):
-        logger.info(f"PHONE TEXT: {message.from_user.id} -> {message.text}")
-        await finish_order(message, state, message.text)
+    if "Позвонить" in message.text:
+        await message.answer(
+            f"📞 **Номер мастера:**\n\n"
+            f"`{MASTER_PHONE}`\n\n"
+            "Нажмите на номер, чтобы скопировать ☝️",
+            parse_mode="Markdown",
+            reply_markup=contact_keyboard()
+        )
+        
+    elif "WhatsApp" in message.text:
+        await message.answer(
+            f"💬 **WhatsApp мастера:**\n\n"
+            f"{MASTER_WHATSAPP}\n\n"
+            "Нажмите на ссылку, чтобы открыть чат ☝️",
+            reply_markup=contact_keyboard()
+        )
+        
+    elif "другую услугу" in message.text:
+        await back_to_catalog(message, state)
+        
     else:
         await message.answer(
-            "Нажмите кнопку или введите номер телефона:",
-            reply_markup=phone_keyboard()
+            f"📞 Номер мастера: `{MASTER_PHONE}`\n\n"
+            "Выберите действие 👇",
+            parse_mode="Markdown",
+            reply_markup=contact_keyboard()
         )
 
 
-# === ЗАВЕРШЕНИЕ ЗАКАЗА ===
+# === FAQ ===
 
-async def finish_order(message: Message, state: FSMContext, phone: str | None):
-    """Завершение заказа — выдача контакта"""
+@dp.message(F.text == BTN_FAQ)
+async def show_faq(message: Message, state: FSMContext):
+    """Показать FAQ"""
+    await state.set_state(Form.faq)
     
-    user_id = message.from_user.id
-    data = await state.get_data()
-    data["phone"] = phone or "не указан"
-    data["status"] = "COMPLETED"
-    
-    logger.info(f"=== ORDER COMPLETE: {user_id} ===")
-    logger.info(f"Data: {data}")
-    
-    # Сохраняем в БД
-    await save_lead(user_id, data)
-    
-    # Отправляем уведомление админу
-    await send_to_admin(user_id, data)
-    
-    # Выдаём контакт мастера
     await message.answer(
-        "✅ **Отлично!**\n\n"
-        f"📞 **Контакт мастера:** `{MASTER_PHONE}`\n\n"
-        "Позвоните или напишите в WhatsApp — мастер ответит в течение 30 минут.\n\n"
-        "Можете скопировать номер нажатием ☝️",
+        "❓ **Частые вопросы**\n\n"
+        "Выберите тему:",
         parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=faq_keyboard()
     )
-    
-    # Дополнительное сообщение
-    await message.answer(
-        "💡 **Что дальше:**\n\n"
-        "1️⃣ Мастер уточнит детали по телефону\n"
-        "2️⃣ Приедет на бесплатный замер\n"
-        "3️⃣ Составит точную смету\n\n"
-        "Спасибо, что выбрали нас! 🙏"
-    )
-    
-    await state.set_state(Form.done)
 
+
+@dp.message(Form.faq)
+async def process_faq(message: Message, state: FSMContext):
+    """Обработка FAQ"""
+    
+    if message.text == BTN_HOME:
+        await go_home(message, state)
+        return
+    
+    # Ищем вопрос
+    for key, faq in FAQ.items():
+        if faq["question"] in message.text:
+            await message.answer(
+                f"**{faq['question']}**\n\n"
+                f"{faq['answer']}",
+                parse_mode="Markdown",
+                reply_markup=faq_keyboard()
+            )
+            return
+    
+    await message.answer("Выбери вопрос из списка 👇", reply_markup=faq_keyboard())
+
+
+# === ОТПРАВКА АДМИНУ ===
 
 async def send_to_admin(user_id: int, data: dict) -> bool:
-    """Отправка уведомления админу"""
+    """Уведомление админа"""
     
     timing = data.get('timing', '').lower()
     if 'сейчас' in timing or '🔥' in timing:
@@ -427,50 +506,35 @@ async def send_to_admin(user_id: int, data: dict) -> bool:
         status = "📝 НОВЫЙ"
     
     tg = f"@{data.get('username')}" if data.get('username') else "—"
-    phone = data.get('phone', '—')
     
     text = f"""
-{'='*35}
+{'='*30}
 📋 НОВАЯ ЗАЯВКА
-{'='*35}
+{'='*30}
 
 {status}
 
-👤 Имя: {data.get('name', '—')}
-📞 Телефон: {phone}
-📱 Telegram: {tg}
-🆔 ID: {user_id}
+👤 {data.get('name', '—')}
+📱 {tg}
+🆔 {user_id}
 
-🔧 Услуга: {data.get('service', '—')}
-💰 Цена: {data.get('service_price', '—')}
-🏠 Объект: {data.get('object_type', '—')}
-📐 Площадь: {data.get('area', '—')}
-📅 Сроки: {data.get('timing', '—')}
+{data.get('service_emoji', '🔧')} {data.get('service', '—')}
+💰 {data.get('service_price', '—')}
+🏠 {data.get('object_type', '—')}
+📐 {data.get('area', '—')}
+📅 {data.get('timing', '—')}
+
 ✅ Цена ОК: {'Да' if data.get('price_accepted') else 'Нет'}
-{'='*35}
+{'='*30}
 """
     
     try:
         await bot.send_message(chat_id=ADMIN_ID, text=text)
-        logger.info(f"✅ Admin notified: {ADMIN_ID}")
+        logger.info(f"✅ Admin notified")
         return True
     except Exception as e:
-        logger.error(f"❌ Admin notify failed: {e}")
+        logger.error(f"❌ Admin error: {e}")
         return False
-
-
-# === ОБРАБОТКА ПОСЛЕ ЗАВЕРШЕНИЯ ===
-
-@dp.message(Form.done)
-async def after_done(message: Message, state: FSMContext):
-    """Сообщения после завершения"""
-    
-    await message.answer(
-        "Если есть вопросы — звоните мастеру! 📞\n\n"
-        f"Номер: `{MASTER_PHONE}`\n\n"
-        "Или напишите /start чтобы оформить новую заявку.",
-        parse_mode="Markdown"
-    )
 
 
 # === ЗАПУСК ===
@@ -479,7 +543,6 @@ async def main():
     await init_db()
     logger.info("🚀 BOT STARTING")
     logger.info(f"ADMIN: {ADMIN_ID}")
-    logger.info(f"MASTER: {MASTER_PHONE}")
     await dp.start_polling(bot)
 
 
