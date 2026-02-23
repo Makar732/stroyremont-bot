@@ -6,7 +6,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 MASTER_PHONE = os.getenv("MASTER_PHONE", "+7 999 123-45-67")
-MASTER_WHATSAPP = os.getenv("MASTER_WHATSAPP", "https://wa.me/79991234567")
+PORTFOLIO_LINK = "https://t.me/StroiRemontNN"
 
 print(f"=== CONFIG ===")
 print(f"ADMIN_ID: {ADMIN_ID}")
