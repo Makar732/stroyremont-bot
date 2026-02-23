@@ -14,7 +14,6 @@ async def init_db():
                 user_id INTEGER,
                 username TEXT,
                 name TEXT,
-                phone TEXT,
                 service TEXT,
                 service_price TEXT,
                 object_type TEXT,
@@ -34,13 +33,12 @@ async def save_lead(user_id: int, data: dict):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO leads 
-                (user_id, username, name, phone, service, service_price, object_type, area, timing, price_accepted, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, username, name, service, service_price, object_type, area, timing, price_accepted, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id,
                 data.get("username", ""),
                 data.get("name", ""),
-                data.get("phone", ""),
                 data.get("service", ""),
                 data.get("service_price", ""),
                 data.get("object_type", ""),
