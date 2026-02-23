@@ -55,7 +55,7 @@ async def call_ai(messages: list, temperature: float = 0.7, max_tokens: int = 10
                     "model": "openai/gpt-4o-mini",
                     "messages": messages,
                     "temperature": temperature,
-                    "max_tokens": max_tokens  # Снижено для экономии
+                    "max_tokens": max_tokens
                 },
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
@@ -105,7 +105,7 @@ def extract_data_simple(text: str, existing: dict) -> dict:
         budget_patterns = [
             r'(\d+)\s*(тыс|т\.р|тр)',
             r'(\d+)\s*(млн|миллион)',
-            r'(\d{6,})',  # 100000+
+            r'(\d{6,})',
             r'бюджет[:\s]*(\d+)',
         ]
         for pattern in budget_patterns:
@@ -122,13 +122,13 @@ def extract_data_simple(text: str, existing: dict) -> dict:
     
     # Адрес/район
     if not data.get("address"):
-        address_words = ['район', 'улица', 'ул.', 'проспект', 'пр.', 'автозавод', 'сормово', 'канавино', 'нижегородск', 'ленинск', 'советск', 'московск', 'приокск']
+        address_words = ['район', 'улица', 'ул.', 'проспект', 'пр.', 'автозавод', 'сормово', 'канавино', 'нижегородск', 'ленинск', 'советск', 'московск', 'приокск', 'центр']
         if any(word in text_lower for word in address_words):
             data["address"] = text
     
-    # Работы (если есть ключевые слова)
+    # Работы
     if not data.get("work"):
-        work_words = ['ремонт', 'плитк', 'электр', 'сантехник', 'штукатур', 'потолок', 'стен', 'пол', 'демонтаж', 'отделк', 'покраск', 'обои', 'ламинат', 'стяжк']
+        work_words = ['ремонт', 'плитк', 'электр', 'сантехник', 'штукатур', 'потолок', 'стен', 'пол', 'демонтаж', 'отделк', 'покраск', 'обои', 'ламинат', 'стяжк', 'ванн', 'кухн', 'комнат', 'туалет', 'санузел']
         if any(word in text_lower for word in work_words):
             data["work"] = text
     
@@ -143,15 +143,16 @@ def get_missing_fields(collected: dict) -> list:
 async def generate_reply(dialog_history: list, collected_data: dict) -> tuple[str, dict, bool]:
     """Генерирует ответ (оптимизированная версия)"""
     
-    # Извлекаем данные из последнего сообщения БЕЗ AI
-    if dialog_history:
-        last_msg = dialog_history[-1].get("content", "")
-        collected_data = extract_data_simple(last_msg, collected_data)
+    # Извлекаем данные из ВСЕХ сообщений пользователя
+    updated_data = collected_data.copy()
+    for msg in dialog_history:
+        if msg.get("role") == "user":
+            updated_data = extract_data_simple(msg.get("content", ""), updated_data)
     
-    missing = get_missing_fields(collected_data)
+    missing = get_missing_fields(updated_data)
     ready_for_lead = len(missing) == 0
     
-    logger.info(f"📊 Collected: {list(collected_data.keys())}, Missing: {missing}")
+    logger.info(f"📊 Collected: {updated_data}, Missing: {missing}")
     
     # Формируем подсказку для AI
     if ready_for_lead:
@@ -167,10 +168,15 @@ async def generate_reply(dialog_history: list, collected_data: dict) -> tuple[st
         }
         task = hints.get(missing[0], "Продолжи разговор")
     
-    # Берём только последние 4 сообщения (экономия токенов)
-    recent = dialog_history[-4:] if len(dialog_history) > 4 else dialog_history
+    # Формируем контекст из собранных данных
+    context = ""
+    if updated_data:
+        context = f"\n\nУже известно о клиенте: {json.dumps(updated_data, ensure_ascii=False)}"
     
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + f"\n\nЗАДАЧА: {task}"}]
+    # Берём последние 6 сообщений для AI (экономия + контекст)
+    recent = dialog_history[-6:] if len(dialog_history) > 6 else dialog_history
+    
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + context + f"\n\nЗАДАЧА: {task}"}]
     messages.extend([{"role": m["role"], "content": m["content"]} for m in recent])
     
     # Вызываем AI
@@ -191,7 +197,7 @@ async def generate_reply(dialog_history: list, collected_data: dict) -> tuple[st
             }
             reply = fallbacks.get(missing[0], "Расскажите подробнее?")
     
-    return reply, collected_data, ready_for_lead
+    return reply, updated_data, ready_for_lead
 
 
 async def check_phone_number(text: str) -> bool:
@@ -201,7 +207,7 @@ async def check_phone_number(text: str) -> bool:
 
 
 async def generate_farewell(client_name: str) -> str:
-    """Генерирует прощание (короткое, экономия токенов)"""
+    """Генерирует прощание"""
     
     reply = await call_ai([
         {"role": "system", "content": "Коротко поблагодари за заявку (1-2 предложения). Скажи что мастер свяжется."},
