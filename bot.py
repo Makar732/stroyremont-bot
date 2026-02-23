@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN, ADMIN_ID, REQUIRED_FIELDS
-from database import init_db, save_lead, save_conversation, reset_user
+from database import init_db, save_lead, save_conversation, get_conversation, reset_user
 from ai_handler import generate_reply, check_phone_number, generate_farewell, generate_questions_response
 
 logging.basicConfig(
@@ -24,10 +24,10 @@ dp = Dispatcher(storage=storage)
 
 
 class ConversationState(StatesGroup):
-    collecting = State()       # Сбор информации
-    asking_questions = State() # Вопросы по ценам
-    waiting_phone = State()    # Ждём телефон
-    chatting = State()         # Свободное общение
+    collecting = State()
+    asking_questions = State()
+    waiting_phone = State()
+    chatting = State()
 
 
 @dp.message(CommandStart())
@@ -44,7 +44,6 @@ async def cmd_start(message: Message, state: FSMContext):
     existing = await get_conversation(user.id)
     
     if existing:
-        # Есть предыдущий диалог - восстанавливаем
         try:
             old_messages = json.loads(existing[0]) if existing[0] else []
             old_data = json.loads(existing[1]) if existing[1] else {}
@@ -65,7 +64,6 @@ async def cmd_start(message: Message, state: FSMContext):
     
     await state.set_state(ConversationState.collecting)
     
-    # Если есть история - приветствуем иначе
     if old_messages:
         greeting = (
             f"С возвращением, {name}! 👋\n\n"
@@ -99,14 +97,21 @@ async def cmd_status(message: Message, state: FSMContext):
     """Показать собранные данные"""
     data = await state.get_data()
     collected = data.get("collected_data", {})
+    history = data.get("dialog_history", [])
     
-    if not collected:
+    if not collected and not history:
         await message.answer("📋 Пока ничего не собрано.")
         return
     
-    text = "📋 **Собрано:**\n\n"
+    text = f"📋 **Собрано данных:** {len(collected)}\n"
+    text += f"💬 **Сообщений в истории:** {len(history)}\n\n"
+    
     for field, value in collected.items():
         text += f"✅ {field}: {value}\n"
+    
+    missing = [f for f in REQUIRED_FIELDS if f not in collected]
+    if missing:
+        text += f"\n⏳ Осталось: {', '.join(missing)}"
     
     await message.answer(text, parse_mode="Markdown")
 
@@ -133,12 +138,16 @@ async def handle_collecting(message: Message, state: FSMContext):
     dialog_history = data.get("dialog_history", [])
     collected_data = data.get("collected_data", {})
     
+    # Добавляем сообщение в историю
     dialog_history.append({"role": "user", "content": message.text})
     
+    # Генерируем ответ
     reply, updated_data, ready_for_lead = await generate_reply(dialog_history, collected_data)
     
+    # Добавляем ответ бота в историю
     dialog_history.append({"role": "assistant", "content": reply})
     
+    # Обновляем состояние
     await state.update_data(
         dialog_history=dialog_history,
         collected_data=updated_data,
@@ -149,7 +158,7 @@ async def handle_collecting(message: Message, state: FSMContext):
         user_id=message.from_user.id,
         username=data.get("username", ""),
         first_name=data.get("name", ""),
-        messages=json.dumps(dialog_history, ensure_ascii=False),  # ← ИСПРАВЛЕНО
+        messages=json.dumps(dialog_history, ensure_ascii=False),
         collected_data=json.dumps(updated_data, ensure_ascii=False)
     )
     
@@ -165,14 +174,21 @@ async def handle_collecting(message: Message, state: FSMContext):
 async def handle_questions(message: Message, state: FSMContext):
     """Обработка вопросов по ценам"""
     
+    data = await state.get_data()
+    dialog_history = data.get("dialog_history", [])
+    
+    # Добавляем сообщение в историю
+    dialog_history.append({"role": "user", "content": message.text})
+    
     text = message.text.lower()
     
     # Проверяем, есть ли вопросы или клиент готов
-    no_questions = ['нет', 'всё понятно', 'все понятно', 'понятно', 'ок', 'хорошо', 'давайте', 'готов', 'жду', 'нету']
+    no_questions = ['нет', 'всё понятно', 'все понятно', 'понятно', 'ок', 'хорошо', 'давайте', 'готов', 'жду', 'нету', 'не', 'нет вопросов']
     
     if any(phrase in text for phrase in no_questions):
         # Нет вопросов - переходим к телефону
         await state.set_state(ConversationState.waiting_phone)
+        await state.update_data(dialog_history=dialog_history)
         
         phone_keyboard = ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="📞 Отправить номер телефона", request_contact=True)]],
@@ -186,16 +202,19 @@ async def handle_questions(message: Message, state: FSMContext):
         )
     else:
         # Есть вопрос - отвечаем
-        data = await state.get_data()
-        dialog_history = data.get("dialog_history", [])
-        
-        dialog_history.append({"role": "user", "content": message.text})
-        
         reply = await generate_questions_response(message.text)
         
         dialog_history.append({"role": "assistant", "content": reply})
-        
         await state.update_data(dialog_history=dialog_history)
+        
+        # Сохраняем в БД
+        await save_conversation(
+            user_id=message.from_user.id,
+            username=data.get("username", ""),
+            first_name=data.get("name", ""),
+            messages=json.dumps(dialog_history, ensure_ascii=False),
+            collected_data=json.dumps(data.get("collected_data", {}), ensure_ascii=False)
+        )
         
         await message.answer(reply)
         await message.answer("Есть ещё вопросы? Или готовы оставить заявку? 😊")
@@ -274,6 +293,16 @@ async def handle_chatting(message: Message, state: FSMContext):
     dialog_history.append({"role": "assistant", "content": reply})
     
     await state.update_data(dialog_history=dialog_history)
+    
+    # Сохраняем в БД
+    await save_conversation(
+        user_id=message.from_user.id,
+        username=data.get("username", ""),
+        first_name=data.get("name", ""),
+        messages=json.dumps(dialog_history, ensure_ascii=False),
+        collected_data=json.dumps(data.get("collected_data", {}), ensure_ascii=False)
+    )
+    
     await message.answer(reply)
 
 
@@ -318,20 +347,17 @@ async def send_lead_to_admin(user_id: int, data: dict) -> bool:
 
 
 def evaluate_lead(data: dict) -> tuple[str, str]:
-    """Оценка заявки (упрощённая)"""
+    """Оценка заявки"""
     
     timing = data.get('timing', '').lower()
     budget = data.get('budget', '').lower()
     
-    # Срочные
     if any(w in timing for w in ['сейчас', 'срочно', 'завтра', 'на этой неделе']):
         return "🔥 ГОРЯЧИЙ", "Готов начать срочно"
     
-    # Скоро
     if any(w in timing for w in ['месяц', 'скоро', 'через неделю']):
         return "✅ ЦЕЛЕВОЙ", "Готов начать скоро"
     
-    # Хороший бюджет
     if any(w in budget for w in ['200', '300', '400', '500', 'млн', 'миллион']):
         return "✅ ЦЕЛЕВОЙ", "Хороший бюджет"
     
