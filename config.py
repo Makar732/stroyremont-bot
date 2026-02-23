@@ -36,7 +36,6 @@ COMPANY_INFO = """
 - Комплексный ремонт: 6000-10000 руб/м²
 """
 
-# Обязательные поля - порядок важен!
 REQUIRED_FIELDS = ["work", "object_type", "area", "address", "timing", "budget"]
 
 FIELD_NAMES = {
