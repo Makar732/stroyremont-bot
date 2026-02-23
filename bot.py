@@ -144,11 +144,12 @@ async def handle_collecting(message: Message, state: FSMContext):
         collected_data=updated_data,
     )
     
+    # Сохраняем ВСЮ историю в БД
     await save_conversation(
         user_id=message.from_user.id,
         username=data.get("username", ""),
         first_name=data.get("name", ""),
-        messages=json.dumps(dialog_history[-20:], ensure_ascii=False),
+        messages=json.dumps(dialog_history, ensure_ascii=False),  # ← ИСПРАВЛЕНО
         collected_data=json.dumps(updated_data, ensure_ascii=False)
     )
     
