@@ -1,28 +1,31 @@
 import asyncio
-import json
 import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import (
+    Message, 
+    CallbackQuery,
+    ReplyKeyboardMarkup, 
+    KeyboardButton, 
+    ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import BOT_TOKEN, ADMIN_ID, REQUIRED_FIELDS, FIELD_NAMES, FIELD_QUESTIONS
-from database import init_db, save_lead, save_conversation, get_conversation, reset_user
-from ai_handler import generate_ai_response, generate_farewell, generate_questions_response, check_phone_number
+from config import BOT_TOKEN, ADMIN_ID, COMPANY_INFO
+from database import init_db, save_lead
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(storage=MemoryStorage())
 
 
+# === СОСТОЯНИЯ ===
 class Form(StatesGroup):
     work = State()
     object_type = State()
@@ -31,450 +34,421 @@ class Form(StatesGroup):
     timing = State()
     budget = State()
     confirm = State()
-    questions = State()
     phone = State()
-    chat = State()
+    questions = State()
 
 
-# Маппинг состояний на поля
-STATE_TO_FIELD = {
-    Form.work: "work",
-    Form.object_type: "object_type",
-    Form.area: "area",
-    Form.address: "address",
-    Form.timing: "timing",
-    Form.budget: "budget",
-}
+# === ДАННЫЕ ДЛЯ КНОПОК ===
 
-FIELD_TO_STATE = {v: k for k, v in STATE_TO_FIELD.items()}
+WORKS = [
+    ["🔨 Комплексный ремонт"],
+    ["🚿 Ванная и санузел", "🍳 Кухня"],
+    ["⚡ Электрика", "🚰 Сантехника"],
+    ["🧱 Плитка", "🎨 Штукатурка/покраска"],
+    ["📦 Демонтаж", "🚪 Перегородки"],
+    ["✏️ Другое (напишу)"]
+]
+
+OBJECTS = [
+    ["🏢 Квартира", "🏠 Дом/коттедж"],
+    ["🏪 Коммерция (офис/магазин)"]
+]
+
+AREAS = [
+    ["До 30 м²", "30-50 м²"],
+    ["50-80 м²", "80-120 м²"],
+    ["Более 120 м²"],
+    ["✏️ Напишу точнее"]
+]
+
+TIMINGS = [
+    ["🔥 Срочно (на этой неделе)"],
+    ["📅 В этом месяце"],
+    ["📆 В ближайшие 2-3 месяца"],
+    ["🤔 Пока планирую"]
+]
+
+BUDGETS = [
+    ["До 100 тыс", "100-300 тыс"],
+    ["300-500 тыс", "500-1000 тыс"],
+    ["Более 1 млн"],
+    ["💬 Нужна оценка"]
+]
+
+CONFIRM = [
+    ["✅ Всё верно, отправить"],
+    ["🔄 Заполнить заново"]
+]
+
+QUESTIONS = [
+    ["💰 Узнать цены"],
+    ["📋 Что входит в ремонт?"],
+    ["⏱ Сколько займёт времени?"],
+    ["✅ Вопросов нет, жду звонка"]
+]
 
 
-def get_phone_keyboard():
+def make_keyboard(buttons: list) -> ReplyKeyboardMarkup:
+    """Создаёт клавиатуру из списка кнопок"""
+    keyboard = [[KeyboardButton(text=btn) for btn in row] for row in buttons]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def phone_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📞 Отправить номер", request_contact=True)]],
+        keyboard=[[KeyboardButton(text="📞 Отправить номер телефона", request_contact=True)]],
         resize_keyboard=True
     )
 
 
-def get_confirm_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="✅ Всё верно")],
-            [KeyboardButton(text="🔄 Заполнить заново")]
-        ],
-        resize_keyboard=True
-    )
-
-
-def format_summary(data: dict) -> str:
-    """Форматирует собранные данные"""
-    text = "📋 **Ваша заявка:**\n\n"
-    for field in REQUIRED_FIELDS:
-        name = FIELD_NAMES.get(field, field)
-        value = data.get(field, "—")
-        text += f"▫️ **{name}:** {value}\n"
-    text += "\n**Всё верно?**"
-    return text
-
+# === КОМАНДЫ ===
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Начало диалога"""
-    
-    user_id = message.from_user.id
-    name = message.from_user.first_name or "Клиент"
-    username = message.from_user.username or ""
-    
-    logger.info(f"=== START from {user_id} ({name}) ===")
-    
-    # Сбрасываем состояние
     await state.clear()
     
-    # Инициализируем данные
+    name = message.from_user.first_name or "Клиент"
+    
     await state.update_data(
         name=name,
-        username=username,
-        collected={}
+        username=message.from_user.username or ""
     )
     
-    # Устанавливаем первое состояние
+    logger.info(f"START: {message.from_user.id} ({name})")
+    
     await state.set_state(Form.work)
     
-    greeting = (
+    await message.answer(
         f"Здравствуйте, {name}! 👋\n\n"
         "Я — помощник компании **СтройРемонтНН**.\n\n"
-        "Мы делаем ремонт в Нижнем Новгороде:\n"
-        "🔨 Демонтаж, электрика, сантехника\n"
-        "🏗 Перегородки, потолки, плитка\n"
-        "✨ Декоративная отделка\n\n"
-        f"{FIELD_QUESTIONS['work']}"
+        "Помогу оформить заявку на ремонт.\n"
+        "Выберите, что вас интересует:",
+        parse_mode="Markdown",
+        reply_markup=make_keyboard(WORKS)
     )
-    
-    await message.answer(greeting, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message, state: FSMContext):
-    """Сброс"""
     await state.clear()
-    await reset_user(message.from_user.id)
-    await message.answer("♻️ Сброшено. Напишите /start", reply_markup=ReplyKeyboardRemove())
-
-
-@dp.message(Command("status"))
-async def cmd_status(message: Message, state: FSMContext):
-    """Статус"""
-    data = await state.get_data()
-    collected = data.get("collected", {})
-    current_state = await state.get_state()
-    
-    text = f"🔹 Состояние: {current_state}\n\n"
-    for field in REQUIRED_FIELDS:
-        value = collected.get(field)
-        emoji = "✅" if value else "❌"
-        text += f"{emoji} {FIELD_NAMES.get(field)}: {value or '—'}\n"
-    
-    await message.answer(text)
+    await message.answer("♻️ Сброшено. Нажмите /start", reply_markup=ReplyKeyboardRemove())
 
 
 # === СБОР ДАННЫХ ===
 
 @dp.message(Form.work)
-async def process_work(message: Message, state: FSMContext):
-    """Сохраняем работы, спрашиваем тип объекта"""
+async def get_work(message: Message, state: FSMContext):
+    work = message.text.replace("🔨", "").replace("🚿", "").replace("🍳", "").replace("⚡", "").replace("🚰", "").replace("🧱", "").replace("🎨", "").replace("📦", "").replace("🚪", "").replace("✏️", "").strip()
     
-    logger.info(f"[work] {message.from_user.id}: {message.text}")
-    
-    data = await state.get_data()
-    collected = data.get("collected", {})
-    collected["work"] = message.text
-    await state.update_data(collected=collected)
-    
-    # Генерируем ответ
-    reply = await generate_ai_response(message.text, collected, FIELD_QUESTIONS["object_type"])
-    if not reply:
-        reply = f"Понял! {FIELD_QUESTIONS['object_type']}"
-    
+    await state.update_data(work=work)
     await state.set_state(Form.object_type)
-    await message.answer(reply)
+    
+    logger.info(f"WORK: {message.from_user.id} -> {work}")
+    
+    await message.answer(
+        f"Отлично! {message.text}\n\n"
+        "Какой тип объекта?",
+        reply_markup=make_keyboard(OBJECTS)
+    )
 
 
 @dp.message(Form.object_type)
-async def process_object_type(message: Message, state: FSMContext):
-    """Сохраняем тип объекта, спрашиваем площадь"""
+async def get_object(message: Message, state: FSMContext):
+    obj = message.text.replace("🏢", "").replace("🏠", "").replace("🏪", "").strip()
     
-    logger.info(f"[object_type] {message.from_user.id}: {message.text}")
-    
-    data = await state.get_data()
-    collected = data.get("collected", {})
-    collected["object_type"] = message.text
-    await state.update_data(collected=collected)
-    
-    reply = await generate_ai_response(message.text, collected, FIELD_QUESTIONS["area"])
-    if not reply:
-        reply = f"Хорошо! {FIELD_QUESTIONS['area']}"
-    
+    await state.update_data(object_type=obj)
     await state.set_state(Form.area)
-    await message.answer(reply)
+    
+    logger.info(f"OBJECT: {message.from_user.id} -> {obj}")
+    
+    await message.answer(
+        "Хорошо! 👍\n\n"
+        "Какая площадь объекта?",
+        reply_markup=make_keyboard(AREAS)
+    )
 
 
 @dp.message(Form.area)
-async def process_area(message: Message, state: FSMContext):
-    """Сохраняем площадь, спрашиваем адрес"""
+async def get_area(message: Message, state: FSMContext):
+    area = message.text.replace("✏️", "").strip()
     
-    logger.info(f"[area] {message.from_user.id}: {message.text}")
-    
-    data = await state.get_data()
-    collected = data.get("collected", {})
-    collected["area"] = message.text
-    await state.update_data(collected=collected)
-    
-    reply = await generate_ai_response(message.text, collected, FIELD_QUESTIONS["address"])
-    if not reply:
-        reply = f"Отлично! {FIELD_QUESTIONS['address']}"
-    
+    await state.update_data(area=area)
     await state.set_state(Form.address)
-    await message.answer(reply)
+    
+    logger.info(f"AREA: {message.from_user.id} -> {area}")
+    
+    await message.answer(
+        "Записал! 📐\n\n"
+        "В каком районе объект?\n"
+        "Напишите район или адрес:",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 
 @dp.message(Form.address)
-async def process_address(message: Message, state: FSMContext):
-    """Сохраняем адрес, спрашиваем сроки"""
-    
-    logger.info(f"[address] {message.from_user.id}: {message.text}")
-    
-    data = await state.get_data()
-    collected = data.get("collected", {})
-    collected["address"] = message.text
-    await state.update_data(collected=collected)
-    
-    reply = await generate_ai_response(message.text, collected, FIELD_QUESTIONS["timing"])
-    if not reply:
-        reply = f"Понял! {FIELD_QUESTIONS['timing']}"
-    
+async def get_address(message: Message, state: FSMContext):
+    await state.update_data(address=message.text)
     await state.set_state(Form.timing)
-    await message.answer(reply)
+    
+    logger.info(f"ADDRESS: {message.from_user.id} -> {message.text}")
+    
+    await message.answer(
+        "Отлично! 📍\n\n"
+        "Когда планируете начать?",
+        reply_markup=make_keyboard(TIMINGS)
+    )
 
 
 @dp.message(Form.timing)
-async def process_timing(message: Message, state: FSMContext):
-    """Сохраняем сроки, спрашиваем бюджет"""
+async def get_timing(message: Message, state: FSMContext):
+    timing = message.text.replace("🔥", "").replace("📅", "").replace("📆", "").replace("🤔", "").strip()
     
-    logger.info(f"[timing] {message.from_user.id}: {message.text}")
-    
-    data = await state.get_data()
-    collected = data.get("collected", {})
-    collected["timing"] = message.text
-    await state.update_data(collected=collected)
-    
-    reply = await generate_ai_response(message.text, collected, FIELD_QUESTIONS["budget"])
-    if not reply:
-        reply = f"Хорошо! {FIELD_QUESTIONS['budget']}"
-    
+    await state.update_data(timing=timing)
     await state.set_state(Form.budget)
-    await message.answer(reply)
+    
+    logger.info(f"TIMING: {message.from_user.id} -> {timing}")
+    
+    await message.answer(
+        "Понял! ⏰\n\n"
+        "Какой примерный бюджет?",
+        reply_markup=make_keyboard(BUDGETS)
+    )
 
 
 @dp.message(Form.budget)
-async def process_budget(message: Message, state: FSMContext):
-    """Сохраняем бюджет, показываем сводку"""
+async def get_budget(message: Message, state: FSMContext):
+    budget = message.text.replace("💬", "").strip()
     
-    logger.info(f"[budget] {message.from_user.id}: {message.text}")
+    await state.update_data(budget=budget)
+    await state.set_state(Form.confirm)
     
-    data = await state.get_data()
-    collected = data.get("collected", {})
-    collected["budget"] = message.text
-    await state.update_data(collected=collected)
-    
-    # Сохраняем в БД
-    await save_conversation(
-        user_id=message.from_user.id,
-        username=data.get("username", ""),
-        first_name=data.get("name", ""),
-        messages="[]",
-        collected_data=json.dumps(collected, ensure_ascii=False)
-    )
+    logger.info(f"BUDGET: {message.from_user.id} -> {budget}")
     
     # Показываем сводку
-    summary = format_summary(collected)
+    data = await state.get_data()
     
-    await state.set_state(Form.confirm)
-    await message.answer(summary, parse_mode="Markdown", reply_markup=get_confirm_keyboard())
+    summary = (
+        "📋 **Ваша заявка:**\n\n"
+        f"🔧 **Работы:** {data.get('work', '—')}\n"
+        f"🏠 **Объект:** {data.get('object_type', '—')}\n"
+        f"📐 **Площадь:** {data.get('area', '—')}\n"
+        f"📍 **Адрес:** {data.get('address', '—')}\n"
+        f"⏰ **Сроки:** {data.get('timing', '—')}\n"
+        f"💰 **Бюджет:** {data.get('budget', '—')}\n\n"
+        "**Всё верно?**"
+    )
     
-    logger.info(f"✅ All data collected for {message.from_user.id}: {collected}")
+    await message.answer(summary, parse_mode="Markdown", reply_markup=make_keyboard(CONFIRM))
 
 
 # === ПОДТВЕРЖДЕНИЕ ===
 
 @dp.message(Form.confirm)
-async def process_confirm(message: Message, state: FSMContext):
-    """Обработка подтверждения"""
-    
+async def confirm_data(message: Message, state: FSMContext):
     text = message.text.lower()
-    logger.info(f"[confirm] {message.from_user.id}: {text}")
     
-    if "верно" in text or "да" in text or "✅" in text:
-        # Подтверждено - спрашиваем про вопросы
+    if "верно" in text or "✅" in text:
         await state.set_state(Form.questions)
+        
         await message.answer(
-            "Отлично! 👍\n\nЕсть вопросы по ценам или услугам?",
-            reply_markup=ReplyKeyboardRemove()
+            "Отлично! 🎉\n\n"
+            "Есть вопросы перед отправкой заявки?",
+            reply_markup=make_keyboard(QUESTIONS)
         )
         
-    elif "заново" in text or "🔄" in text or "изменить" in text:
-        # Заново
-        await state.update_data(collected={})
+    elif "заново" in text or "🔄" in text:
+        await state.update_data(work=None, object_type=None, area=None, address=None, timing=None, budget=None)
         await state.set_state(Form.work)
-        await message.answer(
-            f"Хорошо, начнём заново! 📝\n\n{FIELD_QUESTIONS['work']}",
-            reply_markup=ReplyKeyboardRemove()
-        )
         
-    else:
         await message.answer(
-            "Нажмите кнопку ниже 👇",
-            reply_markup=get_confirm_keyboard()
+            "Хорошо, начнём заново! 📝\n\n"
+            "Выберите тип работ:",
+            reply_markup=make_keyboard(WORKS)
         )
+    else:
+        await message.answer("Выберите вариант 👇", reply_markup=make_keyboard(CONFIRM))
 
 
 # === ВОПРОСЫ ===
 
 @dp.message(Form.questions)
-async def process_questions(message: Message, state: FSMContext):
-    """Обработка вопросов"""
+async def handle_questions(message: Message, state: FSMContext):
+    text = message.text
     
-    text = message.text.lower().strip()
-    logger.info(f"[questions] {message.from_user.id}: {text}")
-    
-    no_words = ['нет', 'нету', 'не', 'понятно', 'ок', 'хорошо', 'давай', 'готов', 'ясно', 'норм']
-    
-    if any(text.startswith(w) or text == w for w in no_words):
-        # Нет вопросов - просим телефон
+    if "нет" in text.lower() or "✅" in text or "жду" in text.lower():
+        # Переходим к телефону
         await state.set_state(Form.phone)
+        
         await message.answer(
-            "📱 Отлично! Нажмите кнопку, чтобы оставить номер телефона.\n"
-            "Мастер свяжется с вами для уточнения деталей:",
-            reply_markup=get_phone_keyboard()
+            "📱 Отлично!\n\n"
+            "Нажмите кнопку, чтобы оставить номер телефона.\n"
+            "Мастер свяжется в течение 30 минут:",
+            reply_markup=phone_keyboard()
         )
+        
+    elif "цен" in text.lower() or "💰" in text:
+        await message.answer(
+            "💰 **Примерные цены:**\n\n"
+            "• Комплексный ремонт: 6000-10000 руб/м²\n"
+            "• Плитка: 900-1500 руб/м²\n"
+            "• Электрика: 500-800 руб/точка\n"
+            "• Сантехника: 3500-6000 руб/точка\n"
+            "• Штукатурка: 450-700 руб/м²\n"
+            "• Потолки: 500-1000 руб/м²\n\n"
+            "Точную смету мастер составит после осмотра.",
+            parse_mode="Markdown",
+            reply_markup=make_keyboard(QUESTIONS)
+        )
+        
+    elif "входит" in text.lower() or "📋" in text:
+        await message.answer(
+            "📋 **Что входит в комплексный ремонт:**\n\n"
+            "• Демонтаж старых покрытий\n"
+            "• Электромонтаж\n"
+            "• Сантехника\n"
+            "• Штукатурка и шпаклёвка\n"
+            "• Укладка плитки\n"
+            "• Покраска/обои\n"
+            "• Установка дверей\n"
+            "• Укладка напольных покрытий\n\n"
+            "Всё включено в стоимость работ.",
+            parse_mode="Markdown",
+            reply_markup=make_keyboard(QUESTIONS)
+        )
+        
+    elif "времени" in text.lower() or "⏱" in text or "сколько" in text.lower():
+        await message.answer(
+            "⏱ **Примерные сроки:**\n\n"
+            "• Ванная комната: 2-3 недели\n"
+            "• Кухня: 2-3 недели\n"
+            "• Комната: 1-2 недели\n"
+            "• Квартира до 50м²: 1-2 месяца\n"
+            "• Квартира 50-100м²: 2-3 месяца\n\n"
+            "Точные сроки — после осмотра.",
+            parse_mode="Markdown",
+            reply_markup=make_keyboard(QUESTIONS)
+        )
+        
     else:
-        # Есть вопрос
-        reply = await generate_questions_response(message.text)
-        await message.answer(reply)
-        await message.answer("Ещё вопросы? Или готовы оставить заявку?")
+        await message.answer(
+            "Выберите вопрос из списка или нажмите «Вопросов нет» 👇",
+            reply_markup=make_keyboard(QUESTIONS)
+        )
 
 
 # === ТЕЛЕФОН ===
 
 @dp.message(Form.phone, F.contact)
-async def process_phone_contact(message: Message, state: FSMContext):
-    """Телефон через контакт"""
-    
+async def get_phone_contact(message: Message, state: FSMContext):
     phone = message.contact.phone_number
     if not phone.startswith("+"):
         phone = "+" + phone
     
-    logger.info(f"[phone] {message.from_user.id}: {phone} (contact)")
-    
-    await finish_lead(message, state, phone)
+    await finish_order(message, state, phone)
 
 
-@dp.message(Form.phone, F.text)
-async def process_phone_text(message: Message, state: FSMContext):
-    """Телефон текстом"""
+@dp.message(Form.phone)
+async def get_phone_text(message: Message, state: FSMContext):
+    # Проверяем на телефон
+    import re
+    clean = re.sub(r'[\s\-\(\)\+]', '', message.text)
     
-    if check_phone_number(message.text):
-        logger.info(f"[phone] {message.from_user.id}: {message.text} (text)")
-        await finish_lead(message, state, message.text.strip())
+    if re.search(r'\d{10,11}', clean):
+        await finish_order(message, state, message.text)
     else:
         await message.answer(
-            "📱 Нажмите кнопку ниже:",
-            reply_markup=get_phone_keyboard()
+            "📱 Нажмите кнопку ниже, чтобы поделиться номером:",
+            reply_markup=phone_keyboard()
         )
 
 
-async def finish_lead(message: Message, state: FSMContext, phone: str):
-    """Завершение - отправка заявки"""
+async def finish_order(message: Message, state: FSMContext, phone: str):
+    """Завершение заказа"""
     
     user_id = message.from_user.id
     data = await state.get_data()
-    collected = data.get("collected", {})
-    collected["phone"] = phone
+    data["phone"] = phone
     
-    logger.info(f"=== FINISHING LEAD for {user_id} ===")
-    logger.info(f"Data: {collected}")
+    logger.info(f"=== LEAD COMPLETE: {user_id} ===")
+    logger.info(f"Data: {data}")
     
-    await message.answer("✅ Номер получен!", reply_markup=ReplyKeyboardRemove())
+    await message.answer("✅ Отлично! Заявка принята!", reply_markup=ReplyKeyboardRemove())
     
     # Отправляем админу
-    success = await send_lead_to_admin(
-        user_id=user_id,
-        name=data.get("name", ""),
-        username=data.get("username", ""),
-        collected=collected
-    )
+    success = await send_to_admin(user_id, data)
     
-    # Генерируем прощание
-    farewell = await generate_farewell(data.get("name", "Клиент"))
-    await message.answer(farewell)
-    
-    # Переходим в чат
-    await state.set_state(Form.chat)
+    # Сохраняем в БД
+    await save_lead(user_id, data)
     
     if success:
-        logger.info(f"✅ Lead sent successfully for {user_id}")
+        await message.answer(
+            "🎉 **Спасибо за заявку!**\n\n"
+            "Мастер свяжется с вами в течение 30 минут "
+            "для уточнения деталей и согласования времени осмотра.\n\n"
+            "Если будут вопросы — пишите! 😊",
+            parse_mode="Markdown"
+        )
     else:
-        logger.error(f"❌ Failed to send lead for {user_id}")
+        await message.answer(
+            "Спасибо! Мы получили вашу заявку.\n"
+            "Мастер скоро свяжется с вами!"
+        )
+    
+    await state.clear()
 
 
-async def send_lead_to_admin(user_id: int, name: str, username: str, collected: dict) -> bool:
-    """Отправка заявки админу"""
+async def send_to_admin(user_id: int, data: dict) -> bool:
+    """Отправка админу"""
     
-    logger.info(f"📤 Sending to admin {ADMIN_ID}")
-    
-    # Оценка
-    timing = collected.get('timing', '').lower()
-    budget = collected.get('budget', '').lower()
-    
-    if any(w in timing for w in ['сейчас', 'срочно', 'завтра']):
+    # Определяем статус
+    timing = data.get('timing', '').lower()
+    if 'срочно' in timing or 'этой неделе' in timing:
         status = "🔥 ГОРЯЧИЙ"
-        reason = "Срочно"
-    elif any(w in timing for w in ['месяц', 'скоро', 'неделю']):
+    elif 'этом месяце' in timing:
         status = "✅ ЦЕЛЕВОЙ"
-        reason = "Скоро"
     else:
         status = "📝 НОВАЯ"
-        reason = "Обработать"
     
-    tg = f"@{username}" if username else "нет"
+    data["status"] = status
+    
+    tg = f"@{data.get('username')}" if data.get('username') else "—"
     
     text = f"""
 {'='*35}
-📋 **НОВАЯ ЗАЯВКА**
+📋 НОВАЯ ЗАЯВКА
 {'='*35}
 
-{status} — {reason}
+{status}
 
-👤 **Имя:** {name}
-📞 **Телефон:** {collected.get('phone', '—')}
-📱 **Telegram:** {tg}
-🆔 **ID:** `{user_id}`
+👤 Имя: {data.get('name', '—')}
+📞 Телефон: {data.get('phone', '—')}
+📱 Telegram: {tg}
+🆔 ID: {user_id}
 
-🔧 **Работы:** {collected.get('work', '—')}
-🏠 **Объект:** {collected.get('object_type', '—')}
-📐 **Площадь:** {collected.get('area', '—')}
-📍 **Адрес:** {collected.get('address', '—')}
-📅 **Сроки:** {collected.get('timing', '—')}
-💰 **Бюджет:** {collected.get('budget', '—')}
+🔧 Работы: {data.get('work', '—')}
+🏠 Объект: {data.get('object_type', '—')}
+📐 Площадь: {data.get('area', '—')}
+📍 Адрес: {data.get('address', '—')}
+⏰ Сроки: {data.get('timing', '—')}
+💰 Бюджет: {data.get('budget', '—')}
 {'='*35}
 """
     
     try:
-        await bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="Markdown")
-        
-        await save_lead(
-            user_id=user_id,
-            data=json.dumps({**collected, "name": name, "username": username}, ensure_ascii=False),
-            score=status,
-            score_reason=reason
-        )
-        
+        await bot.send_message(chat_id=ADMIN_ID, text=text)
+        logger.info(f"✅ Sent to admin {ADMIN_ID}")
         return True
-        
     except Exception as e:
-        logger.error(f"❌ Send error: {e}")
-        
-        # Пробуем без Markdown
-        try:
-            plain_text = text.replace("**", "").replace("`", "").replace("_", "")
-            await bot.send_message(chat_id=ADMIN_ID, text=plain_text)
-            return True
-        except Exception as e2:
-            logger.error(f"❌ Send plain error: {e2}")
-            return False
-
-
-# === ЧАТ ===
-
-@dp.message(Form.chat)
-async def process_chat(message: Message, state: FSMContext):
-    """Свободный чат после заявки"""
-    
-    reply = await generate_questions_response(message.text)
-    if not reply:
-        reply = "Спасибо! Если будут вопросы — пишите. 😊"
-    await message.answer(reply)
+        logger.error(f"❌ Failed to send: {e}")
+        return False
 
 
 # === ЗАПУСК ===
 
 async def main():
     await init_db()
-    
-    logger.info("=" * 50)
     logger.info("🚀 BOT STARTING")
-    logger.info(f"ADMIN_ID: {ADMIN_ID}")
-    logger.info("=" * 50)
-    
+    logger.info(f"ADMIN: {ADMIN_ID}")
     await dp.start_polling(bot)
 
 
