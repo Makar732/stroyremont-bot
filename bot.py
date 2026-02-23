@@ -30,6 +30,15 @@ class ConversationState(StatesGroup):
     chatting = State()
 
 
+def get_phone_keyboard():
+    """Возвращает клавиатуру с кнопкой телефона"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📞 Отправить номер телефона", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     """Обработка команды /start"""
@@ -81,7 +90,7 @@ async def cmd_start(message: Message, state: FSMContext):
             "Расскажите, что хотите сделать? 🏠"
         )
     
-    await message.answer(greeting, parse_mode="Markdown")
+    await message.answer(greeting, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message(Command("reset"))
@@ -106,12 +115,10 @@ async def cmd_status(message: Message, state: FSMContext):
     text = f"📋 **Собрано данных:** {len(collected)}\n"
     text += f"💬 **Сообщений в истории:** {len(history)}\n\n"
     
-    for field, value in collected.items():
-        text += f"✅ {field}: {value}\n"
-    
-    missing = [f for f in REQUIRED_FIELDS if f not in collected]
-    if missing:
-        text += f"\n⏳ Осталось: {', '.join(missing)}"
+    for field in REQUIRED_FIELDS:
+        value = collected.get(field)
+        emoji = "✅" if value else "❌"
+        text += f"{emoji} {field}: {value or 'не указано'}\n"
     
     await message.answer(text, parse_mode="Markdown")
 
@@ -153,7 +160,7 @@ async def handle_collecting(message: Message, state: FSMContext):
         collected_data=updated_data,
     )
     
-    # Сохраняем ВСЮ историю в БД
+    # Сохраняем в БД
     await save_conversation(
         user_id=message.from_user.id,
         username=data.get("username", ""),
@@ -167,7 +174,8 @@ async def handle_collecting(message: Message, state: FSMContext):
     # Если всё собрано - спрашиваем про вопросы
     if ready_for_lead:
         await state.set_state(ConversationState.asking_questions)
-        logger.info(f"Data collected for {message.from_user.id}, asking about questions")
+        logger.info(f"✅ All data collected for {message.from_user.id}")
+        logger.info(f"📊 Data: {updated_data}")
 
 
 @dp.message(ConversationState.asking_questions)
@@ -180,25 +188,27 @@ async def handle_questions(message: Message, state: FSMContext):
     # Добавляем сообщение в историю
     dialog_history.append({"role": "user", "content": message.text})
     
-    text = message.text.lower()
+    text = message.text.lower().strip()
     
     # Проверяем, есть ли вопросы или клиент готов
-    no_questions = ['нет', 'всё понятно', 'все понятно', 'понятно', 'ок', 'хорошо', 'давайте', 'готов', 'жду', 'нету', 'не', 'нет вопросов']
+    no_questions = [
+        'нет', 'нету', 'не', 'всё понятно', 'все понятно', 'понятно', 
+        'ок', 'хорошо', 'давайте', 'готов', 'жду', 'нет вопросов',
+        'всё ясно', 'все ясно', 'ясно', 'норм', 'окей', 'да', 'давай'
+    ]
     
-    if any(phrase in text for phrase in no_questions):
+    is_no_questions = any(text == phrase or text.startswith(phrase) for phrase in no_questions)
+    
+    if is_no_questions:
         # Нет вопросов - переходим к телефону
         await state.set_state(ConversationState.waiting_phone)
         await state.update_data(dialog_history=dialog_history)
         
-        phone_keyboard = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📞 Отправить номер телефона", request_contact=True)]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
+        logger.info(f"📞 Requesting phone from {message.from_user.id}")
         
         await message.answer(
-            "Отлично! Нажмите кнопку, чтобы оставить номер — мастер свяжется с вами 👇",
-            reply_markup=phone_keyboard
+            "Отлично! 👍 Нажмите кнопку, чтобы оставить номер — мастер свяжется с вами:",
+            reply_markup=get_phone_keyboard()
         )
     else:
         # Есть вопрос - отвечаем
@@ -230,53 +240,75 @@ async def handle_phone_contact(message: Message, state: FSMContext):
     if not phone.startswith("+"):
         phone = "+" + phone
     
-    logger.info(f"📞 Phone received: {phone}")
+    logger.info(f"📞 Phone received via contact: {phone}")
     
     collected_data = data.get("collected_data", {})
     collected_data["phone"] = phone
     
+    # Убираем клавиатуру
     await message.answer("✅ Номер получен!", reply_markup=ReplyKeyboardRemove())
     
+    # Отправляем заявку админу
     success = await send_lead_to_admin(
         user_id=message.from_user.id,
-        data={**collected_data, "name": data.get("name", ""), "username": data.get("username", "")}
+        data={
+            **collected_data, 
+            "name": data.get("name", ""), 
+            "username": data.get("username", "")
+        }
     )
     
+    if success:
+        logger.info(f"✅ Lead sent to admin for user {message.from_user.id}")
+    else:
+        logger.error(f"❌ Failed to send lead for user {message.from_user.id}")
+    
+    # Генерируем прощание
     farewell = await generate_farewell(data.get("name", ""))
     await message.answer(farewell)
     
+    # Переходим в режим свободного чата
     await state.set_state(ConversationState.chatting)
-    logger.info(f"Lead sent: {success}")
 
 
 @dp.message(ConversationState.waiting_phone, F.text)
 async def handle_phone_text(message: Message, state: FSMContext):
-    """Телефон текстом"""
+    """Телефон текстом или напоминание о кнопке"""
     
+    # Проверяем, есть ли телефон в тексте
     if await check_phone_number(message.text):
         data = await state.get_data()
         
+        phone = message.text.strip()
+        logger.info(f"📞 Phone received via text: {phone}")
+        
         collected_data = data.get("collected_data", {})
-        collected_data["phone"] = message.text.strip()
+        collected_data["phone"] = phone
         
         await message.answer("✅ Номер получен!", reply_markup=ReplyKeyboardRemove())
         
-        await send_lead_to_admin(
+        success = await send_lead_to_admin(
             user_id=message.from_user.id,
-            data={**collected_data, "name": data.get("name", ""), "username": data.get("username", "")}
+            data={
+                **collected_data, 
+                "name": data.get("name", ""), 
+                "username": data.get("username", "")
+            }
         )
+        
+        if success:
+            logger.info(f"✅ Lead sent to admin for user {message.from_user.id}")
         
         farewell = await generate_farewell(data.get("name", ""))
         await message.answer(farewell)
         
         await state.set_state(ConversationState.chatting)
     else:
-        phone_keyboard = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📞 Отправить номер телефона", request_contact=True)]],
-            resize_keyboard=True,
-            one_time_keyboard=True
+        # Напоминаем про кнопку
+        await message.answer(
+            "Пожалуйста, нажмите кнопку ниже, чтобы поделиться номером 👇",
+            reply_markup=get_phone_keyboard()
         )
-        await message.answer("Нажмите кнопку ниже 👇", reply_markup=phone_keyboard)
 
 
 @dp.message(ConversationState.chatting)
@@ -309,7 +341,8 @@ async def handle_chatting(message: Message, state: FSMContext):
 async def send_lead_to_admin(user_id: int, data: dict) -> bool:
     """Отправляет заявку админу"""
     
-    logger.info(f"Sending lead to {ADMIN_ID}")
+    logger.info(f"📤 Sending lead to admin {ADMIN_ID}")
+    logger.info(f"📊 Lead data: {data}")
     
     status, reason = evaluate_lead(data)
     tg_link = f"@{data.get('username')}" if data.get('username') else "нет"
@@ -339,10 +372,10 @@ async def send_lead_to_admin(user_id: int, data: dict) -> bool:
     try:
         await bot.send_message(chat_id=ADMIN_ID, text=lead_text, parse_mode="Markdown")
         await save_lead(user_id, json.dumps(data, ensure_ascii=False), status, reason)
-        logger.info("✅ Lead sent!")
+        logger.info("✅ Lead sent successfully!")
         return True
     except Exception as e:
-        logger.error(f"❌ Failed: {e}")
+        logger.error(f"❌ Failed to send lead: {e}")
         return False
 
 
