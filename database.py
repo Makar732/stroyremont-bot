@@ -72,7 +72,5 @@ async def is_lead_sent(user_id: int) -> bool:
 
 async def reset_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            DELETE FROM conversations WHERE user_id = ?
-        """, (user_id,))
+        await db.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
         await db.commit()
