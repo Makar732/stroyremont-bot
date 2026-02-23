@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import (
-    BOT_TOKEN, ADMIN_ID, MASTER_PHONE, MASTER_WHATSAPP,
+    BOT_TOKEN, ADMIN_ID, MASTER_PHONE, PORTFOLIO_LINK,
     SERVICES, OBJECTS, AREAS, TIMINGS, FAQ
 )
 from database import init_db, save_lead
@@ -42,6 +42,7 @@ BTN_BACK_CATALOG = "⬅️ Каталог услуг"
 BTN_BACK = "⬅️ Назад"
 BTN_HOME = "🏠 Главное меню"
 BTN_FAQ = "❓ Частые вопросы"
+BTN_PORTFOLIO = "📸 Наши работы"
 
 
 # === КЛАВИАТУРЫ ===
@@ -51,6 +52,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔧 Выбрать услугу")],
+            [KeyboardButton(text=BTN_PORTFOLIO)],
             [KeyboardButton(text=BTN_FAQ)],
         ],
         resize_keyboard=True
@@ -60,6 +62,9 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 def services_keyboard() -> ReplyKeyboardMarkup:
     """Каталог услуг"""
     buttons = []
+    # Портфолио в начале
+    buttons.append([KeyboardButton(text=BTN_PORTFOLIO)])
+    # Услуги
     for key, s in SERVICES.items():
         buttons.append([KeyboardButton(text=f"{s['emoji']} {s['name']} — {s['price']}")])
     buttons.append([KeyboardButton(text=BTN_HOME)])
@@ -100,12 +105,11 @@ def price_check_keyboard() -> ReplyKeyboardMarkup:
 
 
 def contact_keyboard() -> ReplyKeyboardMarkup:
-    """Контакт мастера"""
+    """После показа контакта"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📞 Позвонить мастеру")],
-            [KeyboardButton(text="💬 Написать в WhatsApp")],
             [KeyboardButton(text="🔧 Заказать другую услугу")],
+            [KeyboardButton(text=BTN_PORTFOLIO)],
             [KeyboardButton(text=BTN_HOME)]
         ],
         resize_keyboard=True
@@ -188,6 +192,32 @@ async def go_home(message: Message, state: FSMContext):
     )
 
 
+# === ПОРТФОЛИО ===
+
+@dp.message(F.text == BTN_PORTFOLIO)
+async def show_portfolio(message: Message, state: FSMContext):
+    """Показать портфолио"""
+    
+    current_state = await state.get_state()
+    
+    # Определяем клавиатуру в зависимости от того, откуда пришли
+    if current_state == Form.service.state:
+        keyboard = services_keyboard()
+    elif current_state == Form.contact.state:
+        keyboard = contact_keyboard()
+    else:
+        keyboard = main_menu_keyboard()
+    
+    await message.answer(
+        "📸 **Наши работы**\n\n"
+        "Смотрите примеры наших ремонтов:\n\n"
+        f"👉 {PORTFOLIO_LINK}\n\n"
+        "Там фото и видео реальных объектов ✅",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+
 @dp.message(Form.main_menu, F.text.contains("Выбрать услугу"))
 async def show_services(message: Message, state: FSMContext):
     """Показать каталог"""
@@ -222,6 +252,10 @@ async def process_service(message: Message, state: FSMContext):
     
     if message.text == BTN_HOME:
         await go_home(message, state)
+        return
+    
+    if message.text == BTN_PORTFOLIO:
+        await show_portfolio(message, state)
         return
     
     service = get_service_by_text(message.text)
@@ -263,7 +297,6 @@ async def process_object(message: Message, state: FSMContext):
         await back_to_catalog(message, state)
         return
     
-    # Проверяем валидность
     valid = any(o["name"] in message.text for o in OBJECTS.values())
     if not valid:
         await message.answer("Выбери тип объекта 👇", reply_markup=objects_keyboard())
@@ -378,8 +411,10 @@ async def process_price_check(message: Message, state: FSMContext):
         await message.answer(
             "🎉 **Отлично!**\n\n"
             f"📞 **Телефон мастера:**\n`{MASTER_PHONE}`\n\n"
-            "Мастер ответит в течение 30 минут.\n"
-            "Можете позвонить или написать в WhatsApp 👇",
+            "☝️ Нажмите на номер, чтобы скопировать\n\n"
+            "Мастер ответит в течение 30 минут!\n\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"📸 **Наши работы:**\n{PORTFOLIO_LINK}",
             parse_mode="Markdown",
             reply_markup=contact_keyboard()
         )
@@ -416,43 +451,32 @@ async def another_service(message: Message, state: FSMContext):
     await back_to_catalog(message, state)
 
 
-# === КОНТАКТ МАСТЕРА ===
+# === ПОСЛЕ КОНТАКТА ===
 
 @dp.message(Form.contact)
 async def process_contact(message: Message, state: FSMContext):
-    """Действия с контактом"""
+    """Обработка после показа контакта"""
     
     if message.text == BTN_HOME:
         await go_home(message, state)
         return
     
-    if "Позвонить" in message.text:
-        await message.answer(
-            f"📞 **Номер мастера:**\n\n"
-            f"`{MASTER_PHONE}`\n\n"
-            "Нажмите на номер, чтобы скопировать ☝️",
-            parse_mode="Markdown",
-            reply_markup=contact_keyboard()
-        )
-        
-    elif "WhatsApp" in message.text:
-        await message.answer(
-            f"💬 **WhatsApp мастера:**\n\n"
-            f"{MASTER_WHATSAPP}\n\n"
-            "Нажмите на ссылку, чтобы открыть чат ☝️",
-            reply_markup=contact_keyboard()
-        )
-        
-    elif "другую услугу" in message.text:
+    if message.text == BTN_PORTFOLIO:
+        await show_portfolio(message, state)
+        return
+    
+    if "другую услугу" in message.text:
         await back_to_catalog(message, state)
-        
-    else:
-        await message.answer(
-            f"📞 Номер мастера: `{MASTER_PHONE}`\n\n"
-            "Выберите действие 👇",
-            parse_mode="Markdown",
-            reply_markup=contact_keyboard()
-        )
+        return
+    
+    # На любое другое сообщение показываем номер снова
+    await message.answer(
+        f"📞 **Телефон мастера:**\n`{MASTER_PHONE}`\n\n"
+        f"📸 **Наши работы:**\n{PORTFOLIO_LINK}\n\n"
+        "Выберите действие 👇",
+        parse_mode="Markdown",
+        reply_markup=contact_keyboard()
+    )
 
 
 # === FAQ ===
@@ -478,7 +502,6 @@ async def process_faq(message: Message, state: FSMContext):
         await go_home(message, state)
         return
     
-    # Ищем вопрос
     for key, faq in FAQ.items():
         if faq["question"] in message.text:
             await message.answer(
@@ -524,7 +547,7 @@ async def send_to_admin(user_id: int, data: dict) -> bool:
 📐 {data.get('area', '—')}
 📅 {data.get('timing', '—')}
 
-✅ Цена ОК: {'Да' if data.get('price_accepted') else 'Нет'}
+✅ Цена ОК: Да
 {'='*30}
 """
     
