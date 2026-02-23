@@ -3,7 +3,7 @@ from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
-DB_PATH = "clients.db"
+DB_PATH = "leads.db"
 
 
 async def init_db():
@@ -15,12 +15,12 @@ async def init_db():
                 username TEXT,
                 name TEXT,
                 phone TEXT,
-                work TEXT,
+                service TEXT,
+                service_price TEXT,
                 object_type TEXT,
                 area TEXT,
-                address TEXT,
                 timing TEXT,
-                budget TEXT,
+                price_accepted INTEGER,
                 status TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -30,22 +30,26 @@ async def init_db():
 
 
 async def save_lead(user_id: int, data: dict):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO leads (user_id, username, name, phone, work, object_type, area, address, timing, budget, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user_id,
-            data.get("username", ""),
-            data.get("name", ""),
-            data.get("phone", ""),
-            data.get("work", ""),
-            data.get("object_type", ""),
-            data.get("area", ""),
-            data.get("address", ""),
-            data.get("timing", ""),
-            data.get("budget", ""),
-            data.get("status", "NEW")
-        ))
-        await db.commit()
-        logger.info(f"✅ Lead saved: {user_id}")
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leads 
+                (user_id, username, name, phone, service, service_price, object_type, area, timing, price_accepted, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                data.get("username", ""),
+                data.get("name", ""),
+                data.get("phone", ""),
+                data.get("service", ""),
+                data.get("service_price", ""),
+                data.get("object_type", ""),
+                data.get("area", ""),
+                data.get("timing", ""),
+                1 if data.get("price_accepted") else 0,
+                data.get("status", "NEW")
+            ))
+            await db.commit()
+            logger.info(f"✅ Lead saved: {user_id}")
+    except Exception as e:
+        logger.error(f"❌ Save error: {e}")
