@@ -3,7 +3,7 @@ import json
 import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -70,7 +70,7 @@ async def cmd_reset(message: Message, state: FSMContext):
     """Сброс диалога (для тестирования)"""
     await state.clear()
     await reset_user(message.from_user.id)
-    await message.answer("♻️ Диалог сброшен. Напишите /start чтобы начать заново.")
+    await message.answer("♻️ Диалог сброшен. Напишите /start чтобы начать заново.", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message(Command("status"))
@@ -96,6 +96,32 @@ async def cmd_status(message: Message, state: FSMContext):
         status_text += "\n✅ Вся информация собрана!"
     
     await message.answer(status_text, parse_mode="Markdown")
+
+
+@dp.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Диагностика API"""
+    from ai_handler import check_api_status, call_ai
+    
+    await message.answer("🔍 Проверяю OpenRouter API...")
+    
+    # Проверяем статус
+    status = await check_api_status()
+    
+    status_text = f"**API Status:**\n```\n{json.dumps(status, indent=2, ensure_ascii=False)}\n```"
+    await message.answer(status_text, parse_mode="Markdown")
+    
+    # Пробуем простой запрос
+    await message.answer("🧪 Тестовый запрос к AI...")
+    
+    test_reply = await call_ai([
+        {"role": "user", "content": "Скажи 'Привет, я работаю!'"}
+    ], max_tokens=20)
+    
+    if test_reply:
+        await message.answer(f"✅ AI ответил: {test_reply}")
+    else:
+        await message.answer("❌ AI не ответил! Смотрите логи.")
 
 
 @dp.message(ConversationState.collecting)
@@ -138,17 +164,76 @@ async def handle_collecting(message: Message, state: FSMContext):
         collected_data=json.dumps(updated_data, ensure_ascii=False)
     )
     
-    await message.answer(reply)
-    
     # Если вся информация собрана - переходим к ожиданию телефона
     if ready_for_lead:
         await state.set_state(ConversationState.waiting_phone)
         logger.info(f"All data collected for user {message.from_user.id}, waiting for phone")
+        
+        # Сначала отправляем ответ AI
+        await message.answer(reply)
+        
+        # Затем отправляем кнопку для номера телефона
+        phone_keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📞 Отправить номер телефона", request_contact=True)]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        
+        await message.answer(
+            "Нажмите кнопку ниже, чтобы поделиться номером 👇",
+            reply_markup=phone_keyboard
+        )
+    else:
+        await message.answer(reply)
 
 
-@dp.message(ConversationState.waiting_phone)
-async def handle_phone(message: Message, state: FSMContext):
-    """Обработка номера телефона"""
+@dp.message(ConversationState.waiting_phone, F.contact)
+async def handle_phone_contact(message: Message, state: FSMContext):
+    """Обработка номера телефона через кнопку (контакт)"""
+    
+    data = await state.get_data()
+    
+    # Получаем телефон из контакта
+    phone = message.contact.phone_number
+    
+    # Добавляем + если нет
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    
+    logger.info(f"📞 Received phone via contact: {phone}")
+    
+    # Сохраняем телефон
+    collected_data = data.get("collected_data", {})
+    collected_data["phone"] = phone
+    
+    # Убираем клавиатуру
+    await message.answer("✅ Номер получен!", reply_markup=ReplyKeyboardRemove())
+    
+    # Отправляем заявку админу
+    success = await send_lead_to_admin(
+        user_id=message.from_user.id,
+        data={
+            **collected_data,
+            "name": data.get("name", ""),
+            "username": data.get("username", "")
+        }
+    )
+    
+    # Генерируем прощание
+    farewell = await generate_farewell(data.get("name", ""))
+    await message.answer(farewell)
+    
+    # Переходим в режим свободного чата
+    await state.set_state(ConversationState.chatting)
+    
+    logger.info(f"Lead sent for user {message.from_user.id}, success={success}")
+
+
+@dp.message(ConversationState.waiting_phone, F.text)
+async def handle_phone_text(message: Message, state: FSMContext):
+    """Если написали текстом вместо кнопки - проверяем на телефон"""
     
     data = await state.get_data()
     
@@ -156,11 +241,16 @@ async def handle_phone(message: Message, state: FSMContext):
     has_phone = await check_phone_number(message.text)
     
     if has_phone:
-        # Сохраняем телефон
-        collected_data = data.get("collected_data", {})
-        collected_data["phone"] = message.text
+        # Телефон найден в тексте
+        phone = message.text.strip()
         
-        # Отправляем заявку админу
+        logger.info(f"📞 Received phone via text: {phone}")
+        
+        collected_data = data.get("collected_data", {})
+        collected_data["phone"] = phone
+        
+        await message.answer("✅ Номер получен!", reply_markup=ReplyKeyboardRemove())
+        
         success = await send_lead_to_admin(
             user_id=message.from_user.id,
             data={
@@ -170,20 +260,24 @@ async def handle_phone(message: Message, state: FSMContext):
             }
         )
         
-        # Генерируем прощание
         farewell = await generate_farewell(data.get("name", ""))
         await message.answer(farewell)
         
-        # Переходим в режим свободного чата
         await state.set_state(ConversationState.chatting)
         
-        logger.info(f"Lead sent for user {message.from_user.id}, success={success}")
-        
     else:
-        # Телефон не распознан - просим ещё раз
+        # Напоминаем про кнопку
+        phone_keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📞 Отправить номер телефона", request_contact=True)]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        
         await message.answer(
-            "Хм, не могу распознать номер телефона 🤔\n"
-            "Напишите в формате: +7 999 123-45-67"
+            "Нажмите кнопку ниже, чтобы поделиться номером 👇",
+            reply_markup=phone_keyboard
         )
 
 
