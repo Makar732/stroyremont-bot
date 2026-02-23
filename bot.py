@@ -40,24 +40,48 @@ async def cmd_start(message: Message, state: FSMContext):
     
     logger.info(f"New conversation: user_id={user.id}, name={name}")
     
+    # Пробуем загрузить предыдущую историю
+    existing = await get_conversation(user.id)
+    
+    if existing:
+        # Есть предыдущий диалог - восстанавливаем
+        try:
+            old_messages = json.loads(existing[0]) if existing[0] else []
+            old_data = json.loads(existing[1]) if existing[1] else {}
+            logger.info(f"Restored {len(old_messages)} messages for user {user.id}")
+        except:
+            old_messages = []
+            old_data = {}
+    else:
+        old_messages = []
+        old_data = {}
+    
     await state.update_data(
         name=name,
         username=user.username or "",
-        dialog_history=[],
-        collected_data={},
+        dialog_history=old_messages,
+        collected_data=old_data,
     )
     
     await state.set_state(ConversationState.collecting)
     
-    greeting = (
-        f"Здравствуйте, {name}! 👋\n\n"
-        "Я — помощник компании **СтройРемонтНН**.\n\n"
-        "Мы делаем ремонт в Нижнем Новгороде:\n"
-        "🔨 Демонтаж, электрика, сантехника\n"
-        "🏗 Перегородки, потолки, плитка\n"
-        "✨ Декоративная отделка\n\n"
-        "Расскажите, что хотите сделать? 🏠"
-    )
+    # Если есть история - приветствуем иначе
+    if old_messages:
+        greeting = (
+            f"С возвращением, {name}! 👋\n\n"
+            "Я помню наш разговор. Продолжим?\n"
+            "Или напишите /reset чтобы начать заново."
+        )
+    else:
+        greeting = (
+            f"Здравствуйте, {name}! 👋\n\n"
+            "Я — помощник компании **СтройРемонтНН**.\n\n"
+            "Мы делаем ремонт в Нижнем Новгороде:\n"
+            "🔨 Демонтаж, электрика, сантехника\n"
+            "🏗 Перегородки, потолки, плитка\n"
+            "✨ Декоративная отделка\n\n"
+            "Расскажите, что хотите сделать? 🏠"
+        )
     
     await message.answer(greeting, parse_mode="Markdown")
 
