@@ -61,15 +61,6 @@ async def save_lead(user_id: int, data: str, score: str, score_reason: str):
         )
         await db.commit()
 
-async def is_lead_sent(user_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT status FROM conversations WHERE user_id = ?",
-            (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row and row[0] == 'lead_sent'
-
 async def reset_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
