@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from datetime import datetime
+import pytz
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
@@ -14,7 +16,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import (
     BOT_TOKEN, ADMIN_ID, MASTER_PHONE, PORTFOLIO_LINK,
-    SERVICES, OBJECTS, AREAS, TIMINGS, FAQ
+    SERVICES, OBJECTS, AREAS, TIMINGS, FAQ,
+    WORK_HOUR_START, WORK_HOUR_END
 )
 from database import init_db, save_lead
 
@@ -23,6 +26,21 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+# Часовой пояс Москвы
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+
+
+def is_working_hours() -> bool:
+    """Проверяет, рабочее ли сейчас время (9:00 - 20:00 МСК)"""
+    now = datetime.now(MOSCOW_TZ)
+    return WORK_HOUR_START <= now.hour < WORK_HOUR_END
+
+
+def get_current_datetime() -> str:
+    """Возвращает текущую дату и время в МСК"""
+    now = datetime.now(MOSCOW_TZ)
+    return now.strftime("%d.%m.%Y %H:%M")
 
 
 # === СОСТОЯНИЯ ===
@@ -62,9 +80,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 def services_keyboard() -> ReplyKeyboardMarkup:
     """Каталог услуг"""
     buttons = []
-    # Портфолио в начале
     buttons.append([KeyboardButton(text=BTN_PORTFOLIO)])
-    # Услуги
     for key, s in SERVICES.items():
         buttons.append([KeyboardButton(text=f"{s['emoji']} {s['name']} — {s['price']}")])
     buttons.append([KeyboardButton(text=BTN_HOME)])
@@ -168,8 +184,8 @@ async def cmd_start(message: Message, state: FSMContext):
         f"Привет, {name}! 👋\n\n"
         "Я — бот **СтройРемонтНН**\n\n"
         "🏆 Ремонт в Нижнем Новгороде\n"
-        "📋 Гарантия 5 лет\n"
-        "⚡ Мастер ответит за 30 минут\n\n"
+        "📋 Гарантия на все работы\n"
+        "⚡ Мастер ответит в рабочее время\n\n"
         "Чем могу помочь?",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
@@ -200,7 +216,6 @@ async def show_portfolio(message: Message, state: FSMContext):
     
     current_state = await state.get_state()
     
-    # Определяем клавиатуру в зависимости от того, откуда пришли
     if current_state == Form.service.state:
         keyboard = services_keyboard()
     elif current_state == Form.contact.state:
@@ -276,7 +291,8 @@ async def process_service(message: Message, state: FSMContext):
     await state.set_state(Form.object_type)
     
     await message.answer(
-        f"{service['emoji']} **{service['name']}** — {service['price']}\n\n"
+        f"{service['emoji']} **{service['name']}**\n"
+        f"💰 Цена — {service['price']}\n\n"
         f"💬 _{service['comment']}_\n\n"
         "Какой у вас объект?",
         parse_mode="Markdown",
@@ -377,7 +393,7 @@ async def process_timing(message: Message, state: FSMContext):
         f"🏠 {data.get('object_type')}\n"
         f"📐 {data.get('area')}\n"
         f"📅 {data.get('timing')}\n\n"
-        f"💰 **Стоимость работ: {data.get('service_price')}**\n\n"
+        f"💰 **Цена — {data.get('service_price')}**\n\n"
         "Вам подходит? 👇",
         parse_mode="Markdown",
         reply_markup=price_check_keyboard()
@@ -397,7 +413,6 @@ async def process_price_check(message: Message, state: FSMContext):
     text = message.text.lower()
     
     if "да" in text or "✅" in text or "подходит" in text:
-        # Цена ОК — показываем контакт
         logger.info(f"PRICE OK: {message.from_user.id}")
         
         await state.update_data(price_accepted=True, status="COMPLETED")
@@ -408,19 +423,31 @@ async def process_price_check(message: Message, state: FSMContext):
         
         await state.set_state(Form.contact)
         
-        await message.answer(
-            "🎉 **Отлично!**\n\n"
-            f"📞 **Телефон мастера:**\n`{MASTER_PHONE}`\n\n"
-            "☝️ Нажмите на номер, чтобы скопировать\n\n"
-            "Мастер ответит в течение 30 минут!\n\n"
-            "━━━━━━━━━━━━━━━\n\n"
-            f"📸 **Наши работы:**\n{PORTFOLIO_LINK}",
-            parse_mode="Markdown",
-            reply_markup=contact_keyboard()
-        )
+        # Проверяем рабочее время
+        if is_working_hours():
+            await message.answer(
+                "🎉 **Отлично!**\n\n"
+                f"📞 **Телефон мастера:**\n`{MASTER_PHONE}`\n\n"
+                "☝️ Нажмите на номер, чтобы скопировать\n\n"
+                "🕐 Мастер доступен с 9:00 до 20:00\n\n"
+                "━━━━━━━━━━━━━━━\n\n"
+                f"📸 **Наши работы:**\n{PORTFOLIO_LINK}",
+                parse_mode="Markdown",
+                reply_markup=contact_keyboard()
+            )
+        else:
+            await message.answer(
+                "🕐 **Мастер сейчас недоступен**\n\n"
+                "Рабочее время: с 9:00 до 20:00\n\n"
+                "📝 Ваша заявка сохранена!\n"
+                "Мастер свяжется с вами в рабочее время.\n\n"
+                "━━━━━━━━━━━━━━━\n\n"
+                f"📸 **Наши работы:**\n{PORTFOLIO_LINK}",
+                parse_mode="Markdown",
+                reply_markup=contact_keyboard()
+            )
         
     elif "нет" in text or "❌" in text or "другое" in text:
-        # Цена не подошла
         logger.info(f"PRICE NO: {message.from_user.id}")
         
         await state.update_data(price_accepted=False, status="PRICE_REJECTED")
@@ -430,7 +457,7 @@ async def process_price_check(message: Message, state: FSMContext):
         
         await message.answer(
             "Понимаю! 🤝\n\n"
-            "Это минимальные цены для качественной работы с гарантией.\n\n"
+            "Цена зависит от объёма работ.\n\n"
             "Могу показать другие услуги — возможно, что-то подойдёт лучше 👇",
             reply_markup=back_to_services_keyboard()
         )
@@ -469,14 +496,24 @@ async def process_contact(message: Message, state: FSMContext):
         await back_to_catalog(message, state)
         return
     
-    # На любое другое сообщение показываем номер снова
-    await message.answer(
-        f"📞 **Телефон мастера:**\n`{MASTER_PHONE}`\n\n"
-        f"📸 **Наши работы:**\n{PORTFOLIO_LINK}\n\n"
-        "Выберите действие 👇",
-        parse_mode="Markdown",
-        reply_markup=contact_keyboard()
-    )
+    # Проверяем рабочее время
+    if is_working_hours():
+        await message.answer(
+            f"📞 **Телефон мастера:**\n`{MASTER_PHONE}`\n\n"
+            f"📸 **Наши работы:**\n{PORTFOLIO_LINK}\n\n"
+            "Выберите действие 👇",
+            parse_mode="Markdown",
+            reply_markup=contact_keyboard()
+        )
+    else:
+        await message.answer(
+            "🕐 **Мастер сейчас недоступен**\n\n"
+            "Рабочее время: с 9:00 до 20:00\n\n"
+            f"📸 **Наши работы:**\n{PORTFOLIO_LINK}\n\n"
+            "Выберите действие 👇",
+            parse_mode="Markdown",
+            reply_markup=contact_keyboard()
+        )
 
 
 # === FAQ ===
@@ -529,11 +566,14 @@ async def send_to_admin(user_id: int, data: dict) -> bool:
         status = "📝 НОВЫЙ"
     
     tg = f"@{data.get('username')}" if data.get('username') else "—"
+    current_time = get_current_datetime()
     
     text = f"""
 {'='*30}
 📋 НОВАЯ ЗАЯВКА
 {'='*30}
+
+🕐 {current_time}
 
 {status}
 
@@ -547,7 +587,7 @@ async def send_to_admin(user_id: int, data: dict) -> bool:
 📐 {data.get('area', '—')}
 📅 {data.get('timing', '—')}
 
-✅ Цена ОК: Да
+✅ Цена ОК: {'Да' if data.get('price_accepted') else 'Нет'}
 {'='*30}
 """
     
