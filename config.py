@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -8,46 +9,66 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 MASTER_PHONE = os.getenv("MASTER_PHONE", "+7 999 123-45-67")
 PORTFOLIO_LINK = "https://t.me/StroiRemontNN"
 
+# Рабочее время мастера
+WORK_HOUR_START = 9   # с 9:00
+WORK_HOUR_END = 20    # до 20:00
+
+# Проверка токена
+if not BOT_TOKEN:
+    print("❌ ERROR: BOT_TOKEN not found!")
+    print("Please set BOT_TOKEN in Railway Variables or .env file")
+    sys.exit(1)
+
+if ADMIN_ID == 0:
+    print("⚠️ WARNING: ADMIN_ID not set, notifications disabled")
+
 print(f"=== CONFIG ===")
+print(f"BOT_TOKEN: {BOT_TOKEN[:20]}...")
 print(f"ADMIN_ID: {ADMIN_ID}")
 print(f"MASTER_PHONE: {MASTER_PHONE}")
 
-# === УСЛУГИ ===
+# === УСЛУГИ (обновлено) ===
 SERVICES = {
     "ceiling": {
         "emoji": "✨",
         "name": "Натяжные потолки",
-        "price": "от 2 500 ₽/м²",
-        "comment": "Установка за 1 день, без пыли и грязи. Гарантия 10 лет ✅"
+        "price": "от объёма работ",
+        "comment": "Установка за 1 день, без пыли и грязи. Гарантия ✅"
     },
     "tiles": {
         "emoji": "🧱",
         "name": "Плитка",
-        "price": "от 2 200 ₽/м²",
+        "price": "от объёма работ",
         "comment": "Ровные швы, качественная укладка. Работаем с любой сложностью ✅"
     },
     "electric": {
         "emoji": "⚡",
         "name": "Электромонтаж",
-        "price": "от 800 ₽/точка",
-        "comment": "Проводка по ГОСТу, безопасно и надёжно. Гарантия 5 лет ✅"
+        "price": "от объёма работ",
+        "comment": "Проводка по ГОСТу, безопасно и надёжно. Гарантия ✅"
     },
     "plumbing": {
         "emoji": "🚿",
         "name": "Сантехника",
-        "price": "от 3 500 ₽/точка",
+        "price": "от объёма работ",
         "comment": "Установка без протечек. Работаем аккуратно и чисто ✅"
     },
     "plaster": {
         "emoji": "🪨",
-        "name": "Штукатурка",
-        "price": "от 850 ₽/м²",
+        "name": "Штукатурные работы",
+        "price": "от объёма работ",
         "comment": "Машинная штукатурка — быстро и ровно. Выгодно при больших объёмах ✅"
+    },
+    "painting": {
+        "emoji": "🎨",
+        "name": "Малярные работы",
+        "price": "от объёма работ",
+        "comment": "Покраска, шпаклёвка, поклейка обоев. Ровно и аккуратно ✅"
     },
     "complex": {
         "emoji": "🏠",
         "name": "Комплексный ремонт",
-        "price": "от 10 000 ₽/м²",
+        "price": "от объёма работ",
         "comment": "Ремонт под ключ — вы получаете готовое жильё. Всё включено ✅"
     }
 }
@@ -75,11 +96,11 @@ TIMINGS = {
     "later": {"emoji": "🤔", "name": "Более 3 месяцев"}
 }
 
-# === FAQ ===
+# === FAQ (обновлено) ===
 FAQ = {
     "warranty": {
         "question": "🛡 Гарантия",
-        "answer": "Даём гарантию 5 лет на все виды работ. Если что-то пойдёт не так — исправим бесплатно."
+        "answer": "Даём гарантию на все виды работ. Если что-то пойдёт не так — исправим бесплатно."
     },
     "timing": {
         "question": "⏱ Сроки работ",
